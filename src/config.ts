@@ -10,6 +10,13 @@ export const config = {
    * runs only on Kafka; everything else runs on both.
    */
   bus: process.env.BUS === 'kafka' ? ('kafka' as const) : ('memory' as const),
+  /**
+   * Chaos tests (tests/chaos): stop Kafka, crash and scale consumers through
+   * Docker Compose. Only with CHAOS=true on Kafka, as in CI's Kafka legs.
+   */
+  chaos: process.env.CHAOS === 'true',
+  /** The second CDP instance (compose profile "scale"), for rebalance tests. */
+  cdp2Url: process.env.CDP2_URL ?? 'http://localhost:3012',
   /** On Kafka: how the consumers retry. Must match the services' KAFKA_RETRY_MODE. */
   kafkaRetryMode: process.env.KAFKA_RETRY_MODE === 'topics' ? ('topics' as const) : ('blocking' as const),
   /** Must match the broker's BROKER_MAX_ATTEMPTS. */

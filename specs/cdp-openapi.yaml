@@ -206,7 +206,7 @@ components:
       required: [mode, times]
       additionalProperties: false
       properties:
-        mode: { enum: [fail-before-apply, fail-after-apply] }
+        mode: { enum: [fail-before-apply, fail-after-apply, crash-after-apply] }
         times: { type: integer, minimum: 1, maximum: 1000 }
 
     Error:

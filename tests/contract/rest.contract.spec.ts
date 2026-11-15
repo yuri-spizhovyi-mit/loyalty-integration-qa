@@ -109,6 +109,7 @@ const scenarios: Record<string, Scenario> = {
     return loyalty.getOutbox(customerId);
   },
   'listOutboxEvents 400': ({ loyalty }) => loyalty.getOutbox('x'),
+  'getRelayStatus 200': ({ loyalty }) => loyalty.getRelayStatus(),
 };
 
 test.describe('REST responses match openapi.yaml', () => {

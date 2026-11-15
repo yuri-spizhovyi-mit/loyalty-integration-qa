@@ -28,6 +28,7 @@ export interface DeliveryLookup {
   lag(): Promise<number[]>;
   committedOffsets(): Record<string, string>;
   readonly retryMode: string;
+  readonly assignedPartitions: number[];
   readonly ready: boolean;
 }
 
@@ -101,6 +102,7 @@ export function createApp(store: NotificationStore, faults: FaultInjector, consu
     res.json({
       ready: consumer.ready,
       retryMode: consumer.retryMode,
+      assignedPartitions: consumer.assignedPartitions,
       lag: await consumer.lag(),
       committedOffsets: consumer.committedOffsets(),
     });

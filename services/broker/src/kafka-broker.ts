@@ -49,7 +49,7 @@ const CATCH_UP_TIMEOUT_MS = 5_000;
 export class KafkaBroker implements MessageBroker {
   readonly backend = 'kafka' as const;
   private readonly producer: Producer<string, string, string, string>;
-  private readonly index: Consumer<string, string, string, string>;
+  private index: Consumer<string, string, string, string>;
   private readonly records = new Map<string, IndexedRecord>();
   /** Latest DLT record per queue and message-id. */
   private readonly deadLettered = new Map<string, Map<string, IndexedRecord>>();
@@ -60,7 +60,7 @@ export class KafkaBroker implements MessageBroker {
 
   constructor(
     private readonly bindings: KafkaBinding[],
-    brokers: string[],
+    private readonly brokers: string[],
   ) {
     this.producer = new Producer({
       clientId: 'broker-api',
@@ -70,17 +70,22 @@ export class KafkaBroker implements MessageBroker {
       acks: ProduceAcks.ALL,
       autocreateTopics: false,
     });
-    // A fresh group per start, reading from the beginning, rebuilds the index.
-    this.index = new Consumer({
+    this.index = this.createIndex();
+    for (const { queue } of bindings) this.deadLettered.set(queue, new Map());
+  }
+
+  /** A fresh group each time, reading from the beginning, (re)builds the index. */
+  private createIndex(): Consumer<string, string, string, string> {
+    const index = new Consumer<string, string, string, string>({
       clientId: 'broker-index',
       groupId: `broker-index-${randomUUID()}`,
-      bootstrapBrokers: brokers,
+      bootstrapBrokers: this.brokers,
       deserializers: stringDeserializers,
       autocommit: false,
       maxWaitTime: 100,
     });
-    this.index.on('consumer:group:join', () => (this.joined = true));
-    for (const { queue } of bindings) this.deadLettered.set(queue, new Map());
+    index.on('consumer:group:join', () => (this.joined = true));
+    return index;
   }
 
   get ready(): boolean {
@@ -91,17 +96,27 @@ export class KafkaBroker implements MessageBroker {
     return [...new Set(this.bindings.map((b) => b.topic)), ...this.bindings.map((b) => dltTopic(b.queue))];
   }
 
+  /** Keeps the index consumer running; restarts it if its stream fails (as the consumers do). */
   async start(): Promise<void> {
     for (;;) {
+      const index = this.index;
       try {
-        const stream = await this.index.consume({ topics: this.topics, mode: 'earliest' });
-        stream.on('data', (record) => this.indexRecord(record));
-        stream.on('error', (error) => console.error(`[broker] index consumer error: ${String(error)}`));
-        return;
+        const stream = await index.consume({ topics: this.topics, mode: 'earliest' });
+        await new Promise<void>((resolve) => {
+          stream.on('data', (record) => this.indexRecord(record));
+          stream.once('error', (error) => {
+            console.error(`[broker] index stream failed, restarting: ${String(error)}`);
+            resolve();
+          });
+          stream.once('close', () => resolve());
+        });
       } catch (error) {
         console.error(`[broker] cannot start the index consumer yet: ${String(error)}`);
-        await sleep(1000);
       }
+      this.joined = false;
+      await index.close(true).catch(() => undefined);
+      await sleep(1000);
+      this.index = this.createIndex();
     }
   }
 
@@ -222,13 +237,22 @@ export class KafkaBroker implements MessageBroker {
           lagByPartition: consumer?.lag ?? null,
           lag: consumer ? consumer.lag.reduce((sum, value) => sum + value, 0) : null,
           committedOffsets: consumer?.committedOffsets ?? null,
-          deadLetters: (await this.deadLetters(queue, {})).length,
+          // Counted from the index alone: no per-record lookups, so this stays fast as the DLT grows.
+          deadLetters: this.openDeadLetterCount(queue),
         };
       }),
     );
   }
 
   // ------------------------------------------------------------ internals
+
+  private openDeadLetterCount(queue: string): number {
+    let count = 0;
+    for (const [messageId, dlt] of this.deadLettered.get(queue) ?? []) {
+      if ((this.redriven.get(`${queue}:${messageId}`) ?? 0) <= dlt.timestamp) count += 1;
+    }
+    return count;
+  }
 
   private queuesFor(topic: string): string[] {
     return this.bindings.filter((b) => b.topic === topic).map((b) => b.queue);

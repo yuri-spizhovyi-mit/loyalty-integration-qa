@@ -26,4 +26,4 @@ export interface Profile {
   sync: ProfileSync;
 }
 
-export type FaultMode = 'fail-before-apply' | 'fail-after-apply';
+export type FaultMode = 'fail-before-apply' | 'fail-after-apply' | 'crash-after-apply';

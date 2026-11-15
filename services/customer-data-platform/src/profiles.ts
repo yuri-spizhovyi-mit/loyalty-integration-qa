@@ -49,7 +49,8 @@ export interface Profile {
 
 type FieldGroup = 'tier' | 'balance' | 'membership' | 'activity';
 
-interface ProfileState {
+/** Everything the platform keeps per customer: the profile plus what it needs to merge events. */
+export interface ProfileState {
   profile: Profile;
   versions: Record<FieldGroup, number>;
   sequences: Set<number>;
@@ -68,9 +69,107 @@ export interface ApplyOutcome {
   tierChange: { marketingConsent: boolean | null } | null;
 }
 
+/**
+ * Where profiles live. Two implementations with the same rules: in memory
+ * (ProfileStore, the default) and SQLite (SqliteProfileStore, used on Kafka
+ * so a restarted or second instance sees the same state).
+ */
+export interface ProfileRepository {
+  get(profileId: string): Profile | undefined;
+  apply(event: LoyaltyEvent): ApplyOutcome;
+  /** Runs `work` atomically: either all its writes happen, or none. */
+  transaction<T>(work: () => T): T;
+}
+
 const MAX_MISSING_REPORTED = 100;
 
-export class ProfileStore {
+export function newProfileState(profileId: string): ProfileState {
+  return {
+    profile: {
+      profileId,
+      attributes: {
+        loyalty_tier: null,
+        points_balance: null,
+        marketing_consent: null,
+        member_since: null,
+        last_transaction_id: null,
+        last_transaction_type: null,
+        last_activity_at: null,
+      },
+      sync: {
+        lastSequence: 0,
+        appliedEvents: 0,
+        duplicateEvents: 0,
+        outOfOrderEvents: 0,
+        missingSequences: [],
+        updatedAt: new Date().toISOString(),
+      },
+    },
+    versions: { tier: 0, balance: 0, membership: 0, activity: 0 },
+    sequences: new Set(),
+  };
+}
+
+/** Counts a duplicate delivery on the profile. */
+export function recordDuplicate(state: ProfileState): ApplyOutcome {
+  state.profile.sync.duplicateEvents += 1;
+  state.profile.sync.updatedAt = new Date().toISOString();
+  return { result: 'duplicate', tierChange: null };
+}
+
+/** Applies a new (not yet seen) event to the state, with the versioning rules above. */
+export function applyNewEvent(state: ProfileState, event: LoyaltyEvent): ApplyOutcome {
+  const { profile } = state;
+  if (event.sequence < profile.sync.lastSequence) profile.sync.outOfOrderEvents += 1;
+  state.sequences.add(event.sequence);
+  profile.sync.lastSequence = Math.max(profile.sync.lastSequence, event.sequence);
+  profile.sync.appliedEvents += 1;
+  profile.sync.missingSequences = missing(state);
+  profile.sync.updatedAt = new Date().toISOString();
+
+  const set = (group: FieldGroup, values: Partial<ProfileAttributes>): boolean => {
+    if (event.sequence <= state.versions[group]) return false; // an equal or newer event already wrote these
+    state.versions[group] = event.sequence;
+    Object.assign(profile.attributes, values);
+    return true;
+  };
+
+  let tierChange: ApplyOutcome['tierChange'] = null;
+  switch (event.type) {
+    case 'customer.created':
+      set('membership', { marketing_consent: event.data.marketingConsent, member_since: event.occurredAt });
+      set('tier', { loyalty_tier: lowerTier(event.data.tier) });
+      set('balance', { points_balance: 0 });
+      break;
+    case 'tier.changed':
+      if (set('tier', { loyalty_tier: lowerTier(event.data.newTier) })) {
+        tierChange = { marketingConsent: profile.attributes.marketing_consent };
+      }
+      break;
+    case 'points.earned':
+    case 'points.redeemed':
+    case 'points.refunded':
+      set('balance', {
+        points_balance: event.data.balanceAfter,
+        last_transaction_id: event.data.transactionId,
+        last_transaction_type: event.data.entryType.toLowerCase() as ProfileAttributes['last_transaction_type'],
+      });
+      break;
+  }
+  set('activity', { last_activity_at: event.occurredAt });
+  return { result: 'applied', tierChange };
+}
+
+function missing(state: ProfileState): number[] {
+  const result: number[] = [];
+  for (let seq = 1; seq < state.profile.sync.lastSequence && result.length < MAX_MISSING_REPORTED; seq += 1) {
+    if (!state.sequences.has(seq)) result.push(seq);
+  }
+  return result;
+}
+
+/** In-memory profiles: the default, and what the in-memory broker setup uses. */
+export class ProfileStore implements ProfileRepository {
   private readonly states = new Map<string, ProfileState>();
   private readonly seenEventIds = new Set<string>();
 
@@ -80,95 +179,19 @@ export class ProfileStore {
   }
 
   apply(event: LoyaltyEvent): ApplyOutcome {
-    const state = this.stateFor(event.customerId);
-    const { profile } = state;
-    const now = new Date().toISOString();
-
-    if (this.seenEventIds.has(event.eventId)) {
-      profile.sync.duplicateEvents += 1;
-      profile.sync.updatedAt = now;
-      return { result: 'duplicate', tierChange: null };
-    }
-    this.seenEventIds.add(event.eventId);
-
-    if (event.sequence < profile.sync.lastSequence) profile.sync.outOfOrderEvents += 1;
-    state.sequences.add(event.sequence);
-    profile.sync.lastSequence = Math.max(profile.sync.lastSequence, event.sequence);
-    profile.sync.appliedEvents += 1;
-    profile.sync.missingSequences = this.missing(state);
-    profile.sync.updatedAt = now;
-
-    const set = (group: FieldGroup, values: Partial<ProfileAttributes>): boolean => {
-      if (event.sequence <= state.versions[group]) return false; // an equal or newer event already wrote these
-      state.versions[group] = event.sequence;
-      Object.assign(profile.attributes, values);
-      return true;
-    };
-
-    let tierChange: ApplyOutcome['tierChange'] = null;
-    switch (event.type) {
-      case 'customer.created':
-        set('membership', { marketing_consent: event.data.marketingConsent, member_since: event.occurredAt });
-        set('tier', { loyalty_tier: lowerTier(event.data.tier) });
-        set('balance', { points_balance: 0 });
-        break;
-      case 'tier.changed':
-        if (set('tier', { loyalty_tier: lowerTier(event.data.newTier) })) {
-          tierChange = { marketingConsent: profile.attributes.marketing_consent };
-        }
-        break;
-      case 'points.earned':
-      case 'points.redeemed':
-      case 'points.refunded':
-        set('balance', {
-          points_balance: event.data.balanceAfter,
-          last_transaction_id: event.data.transactionId,
-          last_transaction_type: event.data.entryType.toLowerCase() as ProfileAttributes['last_transaction_type'],
-        });
-        break;
-    }
-    set('activity', { last_activity_at: event.occurredAt });
-    return { result: 'applied', tierChange };
-  }
-
-  private stateFor(profileId: string): ProfileState {
-    let state = this.states.get(profileId);
+    let state = this.states.get(event.customerId);
     if (!state) {
-      state = {
-        profile: {
-          profileId,
-          attributes: {
-            loyalty_tier: null,
-            points_balance: null,
-            marketing_consent: null,
-            member_since: null,
-            last_transaction_id: null,
-            last_transaction_type: null,
-            last_activity_at: null,
-          },
-          sync: {
-            lastSequence: 0,
-            appliedEvents: 0,
-            duplicateEvents: 0,
-            outOfOrderEvents: 0,
-            missingSequences: [],
-            updatedAt: new Date().toISOString(),
-          },
-        },
-        versions: { tier: 0, balance: 0, membership: 0, activity: 0 },
-        sequences: new Set(),
-      };
-      this.states.set(profileId, state);
+      state = newProfileState(event.customerId);
+      this.states.set(event.customerId, state);
     }
-    return state;
+    if (this.seenEventIds.has(event.eventId)) return recordDuplicate(state);
+    this.seenEventIds.add(event.eventId);
+    return applyNewEvent(state, event);
   }
 
-  private missing(state: ProfileState): number[] {
-    const result: number[] = [];
-    for (let seq = 1; seq < state.profile.sync.lastSequence && result.length < MAX_MISSING_REPORTED; seq += 1) {
-      if (!state.sequences.has(seq)) result.push(seq);
-    }
-    return result;
+  /** Single-threaded and in memory: nothing can interleave, so this just runs the work. */
+  transaction<T>(work: () => T): T {
+    return work();
   }
 }
 

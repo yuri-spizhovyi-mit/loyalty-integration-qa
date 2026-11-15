@@ -55,8 +55,16 @@ test.describe('Kafka: offsets', () => {
     };
 
     // While the record is being retried, the group has not committed past it.
-    await expect.poll(async () => (await queues.delivery(placement.messageId)).attempts, POLL).toBeGreaterThanOrEqual(1);
-    expect(await committed(), 'not committed while retrying').toBeLessThanOrEqual(BigInt(placement.offset!));
+    // Status and offset are read in one sample, so the check cannot straddle the ack.
+    const sample = async () => {
+      const [offset, delivery] = await Promise.all([committed(), queues.delivery(placement.messageId)]);
+      if (delivery.status !== 'pending') return `finished (${delivery.status}) before a retry was seen`;
+      if (delivery.attempts < 1) return 'waiting';
+      return offset <= BigInt(placement.offset!) ? 'retrying, not committed' : 'committed while retrying';
+    };
+    await expect
+      .poll(sample, { intervals: [10, 25, 50], timeout: 5_000, message: 'not committed while retrying' })
+      .toBe('retrying, not committed');
 
     await waitForDelivery(queues, placement.messageId, 'delivered');
     await expect.poll(committed, { ...POLL, message: 'committed after the ack' }).toBeGreaterThan(BigInt(placement.offset!));

@@ -20,6 +20,7 @@ const consumer = kafka
       maxAttempts: Number(process.env.BROKER_MAX_ATTEMPTS ?? 4),
       retryBaseMs: Number(process.env.BROKER_RETRY_BASE_MS ?? 100),
       retryMode: retryModeFromEnv(),
+      instanceId: process.env.CONSUMER_INSTANCE_ID,
     })
   : undefined;
 

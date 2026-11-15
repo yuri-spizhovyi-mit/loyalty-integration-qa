@@ -18,7 +18,12 @@ function correlationIdOf(res: Response): string {
   return res.locals.correlationId as string;
 }
 
-export function createApp(service: LoyaltyService, outbox: InMemoryEventLog) {
+/** What the event relay reports; see RelayStatus in services/shared/kafka.ts. */
+export interface RelayStatusSource {
+  status(): { transport: 'kafka' | 'http' | 'none'; pending: number; failedSends: number; lastError: string | null; lastErrorAt: string | null };
+}
+
+export function createApp(service: LoyaltyService, outbox: InMemoryEventLog, relay?: RelayStatusSource) {
   const app = express();
   const idempotency = new IdempotencyStore();
 
@@ -98,6 +103,10 @@ export function createApp(service: LoyaltyService, outbox: InMemoryEventLog) {
   });
 
   // Test inspection: the events published for one customer, in publish order.
+  app.get('/internal/relay', (_req, res) => {
+    res.json(relay?.status() ?? { transport: 'none', pending: 0, failedSends: 0, lastError: null, lastErrorAt: null });
+  });
+
   app.get('/internal/outbox', (req, res) => {
     const customerId = req.query.customerId;
     if (typeof customerId !== 'string' || !CUSTOMER_ID_PATTERN.test(customerId)) {

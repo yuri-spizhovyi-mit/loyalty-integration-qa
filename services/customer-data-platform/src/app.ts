@@ -1,11 +1,11 @@
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { InvalidEventError, parseEvent } from './events.js';
 import type { FaultInjector, FaultMode } from './faults.js';
-import type { ProfileStore } from './profiles.js';
+import type { ProfileRepository } from './profiles.js';
 import { type ProfileEventPublisher, profileTierChanged } from './publisher.js';
 
 const PROFILE_ID = /^[A-Za-z0-9_-]{3,64}$/;
-const FAULT_MODES: readonly FaultMode[] = ['fail-before-apply', 'fail-after-apply'];
+const FAULT_MODES: readonly FaultMode[] = ['fail-before-apply', 'fail-after-apply', 'crash-after-apply'];
 const MAX_FAULT_TIMES = 1000;
 
 interface ErrorDetails {
@@ -29,6 +29,7 @@ export interface DeliveryLookup {
   lag(): Promise<number[]>;
   committedOffsets(): Record<string, string>;
   readonly retryMode: string;
+  readonly assignedPartitions: number[];
   readonly ready: boolean;
 }
 
@@ -37,7 +38,7 @@ export interface DeliveryLookup {
  * in-memory broker, or read from Kafka. The answer uses HTTP semantics in
  * both cases: 2xx = ack, 400 = never retry, 503 = retry.
  */
-export function eventHandler(profiles: ProfileStore, faults: FaultInjector, publisher: ProfileEventPublisher) {
+export function eventHandler(profiles: ProfileRepository, faults: FaultInjector, publisher: ProfileEventPublisher) {
   return (raw: string, meta: { messageId: string | null; correlationId: string | null }): EventResult => {
     const error = (status: number, details: ErrorDetails): EventResult => ({
       status,
@@ -56,11 +57,18 @@ export function eventHandler(profiles: ProfileStore, faults: FaultInjector, publ
     if (fault === 'fail-before-apply') {
       return error(503, { code: 'INJECTED_FAULT', message: 'Simulated failure before apply' });
     }
-    const { result, tierChange } = profiles.apply(event);
-    // Queued together with the profile write, before the response: a lost
-    // ack below cannot lose the downstream event (see BrokerRelay).
-    if (tierChange && event.type === 'tier.changed') {
-      publisher.publish(profileTierChanged(event, tierChange.marketingConsent));
+    // One transaction: the profile write and the outgoing event (outbox) happen
+    // together or not at all. A lost ack or a crash below cannot lose the event.
+    const { result } = profiles.transaction(() => {
+      const outcome = profiles.apply(event);
+      if (outcome.tierChange && event.type === 'tier.changed') {
+        publisher.publish(profileTierChanged(event, outcome.tierChange.marketingConsent));
+      }
+      return outcome;
+    });
+    if (fault === 'crash-after-apply') {
+      console.warn(`[cdp] injected crash after applying ${event.eventId}`);
+      process.exit(1);
     }
     if (fault === 'fail-after-apply') {
       return error(503, { code: 'INJECTED_FAULT', message: 'Simulated failure after apply (ack lost)' });
@@ -70,7 +78,7 @@ export function eventHandler(profiles: ProfileStore, faults: FaultInjector, publ
 }
 
 export function createApp(
-  profiles: ProfileStore,
+  profiles: ProfileRepository,
   faults: FaultInjector,
   publisher: ProfileEventPublisher,
   consumer?: DeliveryLookup,
@@ -116,6 +124,7 @@ export function createApp(
     res.json({
       ready: consumer.ready,
       retryMode: consumer.retryMode,
+      assignedPartitions: consumer.assignedPartitions,
       lag: await consumer.lag(),
       committedOffsets: consumer.committedOffsets(),
     });

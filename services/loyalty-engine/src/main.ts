@@ -1,5 +1,5 @@
 import { KAFKA_TOPICS, KafkaRelay, kafkaBrokers } from '../../shared/kafka.js';
-import { createApp } from './app.js';
+import { createApp, type RelayStatusSource } from './app.js';
 import { LoyaltyStore } from './domain/store.js';
 import { BrokerRelay, type EventPublisher, FanOutPublisher, InMemoryEventLog, type LoyaltyEvent } from './events.js';
 import { LoyaltyService } from './service.js';
@@ -16,7 +16,7 @@ const brokerUrl = process.env.BROKER_URL;
 const kafka = kafkaBrokers();
 
 const outbox = new InMemoryEventLog();
-const relay: EventPublisher | null = kafka
+const relay: (EventPublisher & RelayStatusSource) | null = kafka
   ? new KafkaRelay<LoyaltyEvent>('loyalty-engine', kafka, KAFKA_TOPICS.loyalty)
   : brokerUrl
     ? new BrokerRelay(brokerUrl)
@@ -24,7 +24,7 @@ const relay: EventPublisher | null = kafka
 const publisher: EventPublisher = relay ? new FanOutPublisher(outbox, relay) : outbox;
 const transport = kafka ? `Kafka ${kafka.join(',')}` : (brokerUrl ?? 'none');
 const service = new LoyaltyService(new LoyaltyStore(), publisher, { processingDelayMs });
-const server = createApp(service, outbox).listen(port, () => {
+const server = createApp(service, outbox, relay ?? undefined).listen(port, () => {
   console.log(
     `[loyalty-engine] listening on http://localhost:${port} (processing delay ${processingDelayMs} ms, ` +
       `events -> ${transport})`,

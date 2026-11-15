@@ -7,8 +7,12 @@
  * - fail-after-apply: apply the event, then answer 503 (the ack was lost).
  *   The broker redelivers an event that was already applied, which the
  *   consumer must recognise as a duplicate.
+ * - crash-after-apply: apply the event (and commit it to the store), then
+ *   kill the process before answering. Only meaningful on Kafka with the
+ *   SQLite store: the container restarts, the offset was never committed,
+ *   and the event is delivered again.
  */
-export type FaultMode = 'fail-before-apply' | 'fail-after-apply';
+export type FaultMode = 'fail-before-apply' | 'fail-after-apply' | 'crash-after-apply';
 
 export interface Fault {
   mode: FaultMode;

@@ -44,6 +44,10 @@ export class LoyaltyClient {
     return this.checked('getLedger', this.request.get(`/customers/${encodeURIComponent(customerId)}/ledger`));
   }
 
+  getRelayStatus(): Promise<APIResponse> {
+    return this.checked('getRelayStatus', this.request.get('/internal/relay'));
+  }
+
   getOutbox(customerId: string): Promise<APIResponse> {
     return this.checked('listOutboxEvents', this.request.get('/internal/outbox', { params: { customerId } }));
   }

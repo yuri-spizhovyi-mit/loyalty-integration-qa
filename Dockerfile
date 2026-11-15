@@ -15,6 +15,10 @@ RUN npm ci --include=dev --no-audit --no-fund \
 COPY tsconfig.json ./
 COPY services ./services
 
+# Writable by the node user, for the SQLite file on Kafka (a named volume
+# mounted here takes this directory's owner on first use).
+RUN mkdir -p /data && chown node:node /data
+
 USER node
 ENV SERVICE=loyalty-engine
 CMD ["sh", "-c", "exec node_modules/.bin/tsx services/${SERVICE}/src/main.ts"]

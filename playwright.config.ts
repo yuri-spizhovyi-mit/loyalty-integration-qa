@@ -59,6 +59,20 @@ export default defineConfig({
           },
         ]
       : []),
+    // Kafka failures driven through Docker Compose. Last of all, alone:
+    // they stop Kafka and crash or scale the CDP.
+    ...(config.bus === 'kafka' && config.chaos
+      ? [
+          {
+            name: 'chaos',
+            testDir: 'tests/chaos',
+            fullyParallel: false,
+            workers: 1,
+            timeout: 180_000,
+            dependencies: ['kafka'],
+          },
+        ]
+      : []),
   ],
   // Start order does not matter: the relays in the engine and the customer
   // data platform retry until the broker is up, and the broker retries until

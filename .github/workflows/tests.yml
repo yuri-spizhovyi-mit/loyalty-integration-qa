@@ -37,7 +37,7 @@ jobs:
   test:
     name: Tests on ${{ matrix.name }} (Docker Compose stack)
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -61,6 +61,9 @@ jobs:
       BUS: ${{ matrix.bus }}
       # Read by docker-compose.kafka.yml and by the tests (which Kafka tests to run).
       KAFKA_RETRY_MODE: ${{ matrix.retry_mode || 'blocking' }}
+      # On Kafka, also run tests/chaos: they stop Kafka and crash or scale the
+      # CDP through docker compose (COMPOSE_FILE above).
+      CHAOS: ${{ matrix.bus == 'kafka' && 'true' || 'false' }}
       # docker compose reads the file list from here (":"-separated on Linux).
       COMPOSE_FILE: ${{ matrix.compose_file }}
       # Setting LOYALTY_URL tells Playwright the stack is already running, so
@@ -89,14 +92,16 @@ jobs:
         run: |
           if [ "$BUS" = kafka ] && [ "$REPEAT_EACH" != 1 ]; then
             # Playwright does not repeat projects that another project depends
-            # on, and the kafka project depends on all the others (it must run
-            # alone). So repeated runs go in two parts.
+            # on, and the kafka and chaos projects depend on the others (they
+            # must run alone). So repeated runs go in parts, one after another.
             status=0
             npx playwright test --project=contract --project=api --project=events \
               --project=integrity --project=notifications --repeat-each "$REPEAT_EACH" || status=$?
-            PLAYWRIGHT_HTML_OUTPUT_DIR=playwright-report/kafka-project \
-              npx playwright test --project=kafka --no-deps --repeat-each "$REPEAT_EACH" \
-              --output test-results/kafka-project || status=$?
+            for project in kafka chaos; do
+              PLAYWRIGHT_HTML_OUTPUT_DIR="playwright-report/$project-project" \
+                npx playwright test --project="$project" --no-deps --repeat-each "$REPEAT_EACH" \
+                --output "test-results/$project-project" || status=$?
+            done
             exit $status
           else
             npx playwright test --repeat-each "$REPEAT_EACH"

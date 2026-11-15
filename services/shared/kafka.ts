@@ -71,6 +71,17 @@ interface Publishable {
   correlationId: string;
 }
 
+/** What a relay reports at /internal/relay: is it keeping up, and if not, why. */
+export interface RelayStatus {
+  transport: 'kafka' | 'http' | 'none';
+  /** Events accepted from the service but not yet acknowledged by the bus. */
+  pending: number;
+  /** Failed send attempts since start; each one is retried. */
+  failedSends: number;
+  lastError: string | null;
+  lastErrorAt: string | null;
+}
+
 /**
  * Outbox relay to Kafka, the counterpart of the HTTP BrokerRelay: events are
  * queued in memory in publish order and sent one at a time, retrying until
@@ -81,6 +92,8 @@ export class KafkaRelay<T extends Publishable> {
   private readonly producer: Producer<string, string, string, string>;
   private readonly pending: T[] = [];
   private draining = false;
+  private failedSends = 0;
+  private lastError: { message: string; at: string } | null = null;
 
   constructor(
     private readonly service: string,
@@ -101,6 +114,16 @@ export class KafkaRelay<T extends Publishable> {
   publish(event: T): void {
     this.pending.push(event);
     void this.drain();
+  }
+
+  status(): RelayStatus {
+    return {
+      transport: 'kafka',
+      pending: this.pending.length,
+      failedSends: this.failedSends,
+      lastError: this.lastError?.message ?? null,
+      lastErrorAt: this.lastError?.at ?? null,
+    };
   }
 
   async close(): Promise<void> {
@@ -126,6 +149,8 @@ export class KafkaRelay<T extends Publishable> {
           });
           this.pending.shift();
         } catch (error) {
+          this.failedSends += 1;
+          this.lastError = { message: String(error).slice(0, 300), at: new Date().toISOString() };
           console.error(`[${this.service}] Kafka produce failed, retrying: ${String(error)}`);
           await sleep(this.retryDelayMs);
         }
@@ -170,6 +195,11 @@ export interface ConsumerRunnerOptions {
   maxAttempts: number;
   retryBaseMs: number;
   retryMode: RetryMode;
+  /**
+   * Static group membership (KIP-345): a restarted instance with the same id
+   * gets its partitions back at once, without waiting for the session timeout.
+   */
+  instanceId?: string;
 }
 
 /** Where a record was first read from; kept through retry topics so the DLT can point at it. */
@@ -200,25 +230,19 @@ interface Origin {
  * between means redelivery, not loss.
  */
 export class ConsumerRunner {
-  private readonly consumer: Consumer<string, string, string, string>;
+  private consumer: Consumer<string, string, string, string>;
   private readonly producer: Producer<string, string, string, string>;
   private readonly deliveries = new Map<string, Delivery>();
   private readonly chains = new Map<string, Promise<void>>();
   /** Committed offset (next to read) per main-topic partition, after the commit succeeded. */
   private readonly committed = new Map<number, bigint>();
+  private assigned: number[] = [];
   private joined = false;
+  private consuming = false;
+  private closing = false;
 
   constructor(private readonly options: ConsumerRunnerOptions) {
-    this.consumer = new Consumer({
-      clientId: `${options.service}-consumer`,
-      groupId: options.group,
-      bootstrapBrokers: options.brokers,
-      deserializers: stringDeserializers,
-      autocommit: false,
-      sessionTimeout: 10_000,
-      heartbeatInterval: 1_000,
-      maxWaitTime: 100,
-    });
+    this.consumer = this.createConsumer();
     this.producer = new Producer({
       clientId: `${options.service}-retry-dlt`,
       bootstrapBrokers: options.brokers,
@@ -227,21 +251,46 @@ export class ConsumerRunner {
       acks: ProduceAcks.ALL,
       autocreateTopics: false,
     });
-    this.consumer.on('consumer:group:join', () => {
+  }
+
+  private createConsumer(): Consumer<string, string, string, string> {
+    const { options } = this;
+    const consumer = new Consumer<string, string, string, string>({
+      clientId: `${options.service}-consumer`,
+      groupId: options.group,
+      ...(options.instanceId ? { groupInstanceId: options.instanceId } : {}),
+      bootstrapBrokers: options.brokers,
+      deserializers: stringDeserializers,
+      autocommit: false,
+      sessionTimeout: 10_000,
+      heartbeatInterval: 1_000,
+      maxWaitTime: 100,
+    });
+    consumer.on('consumer:group:join', (payload) => {
       this.joined = true;
+      this.assigned = (payload.assignments ?? [])
+        .filter((a) => a.topic === options.topic)
+        .flatMap((a) => a.partitions)
+        .sort((a, b) => a - b);
       console.log(
         `[${options.service}] joined consumer group ${options.group} on ${this.topics.join(', ')} (retries: ${options.retryMode})`,
       );
     });
+    return consumer;
   }
 
-  /** True once the group is joined, so /health can wait for it. */
+  /** True while the group is joined and the stream is reading, so /health can report it. */
   get ready(): boolean {
-    return this.joined;
+    return this.joined && this.consuming;
   }
 
   get retryMode(): RetryMode {
     return this.options.retryMode;
+  }
+
+  /** Main-topic partitions this instance owns since the last rebalance. */
+  get assignedPartitions(): number[] {
+    return [...this.assigned];
   }
 
   private get retryTopics(): string[] {
@@ -269,22 +318,49 @@ export class ConsumerRunner {
     return Object.fromEntries([...this.committed].map(([partition, offset]) => [String(partition), String(offset)]));
   }
 
+  /** Starts consuming, and keeps doing so: see supervise(). */
   async start(): Promise<void> {
-    // Keep trying until Kafka is reachable and the topics exist.
-    for (;;) {
+    void this.supervise();
+  }
+
+  /**
+   * Keeps a stream running. If the stream fails or closes (for example after
+   * a long Kafka outage the client gives up fetching), the consumer is closed
+   * and a new one joins the group and subscribes again. Without this, the
+   * consumer stays in the group with no partitions and silently stops
+   * reading, which is the bug the chaos tests found. Records that were in
+   * flight are not committed, so the new consumer reads them again and they
+   * are handled as duplicates.
+   */
+  private async supervise(): Promise<void> {
+    while (!this.closing) {
+      const consumer = this.consumer;
       try {
-        const stream = await this.consumer.consume({ topics: this.topics, mode: 'committed', fallbackMode: 'earliest' });
-        stream.on('data', (message) => this.enqueue(message));
-        stream.on('error', (error) => console.error(`[${this.options.service}] consumer error: ${String(error)}`));
-        return;
+        const stream = await consumer.consume({ topics: this.topics, mode: 'committed', fallbackMode: 'earliest' });
+        this.consuming = true;
+        await new Promise<void>((resolve) => {
+          stream.on('data', (message) => this.enqueue(message));
+          stream.once('error', (error) => {
+            console.error(`[${this.options.service}] consumer stream failed, restarting: ${String(error)}`);
+            resolve();
+          });
+          stream.once('close', () => resolve());
+        });
       } catch (error) {
         console.error(`[${this.options.service}] cannot start consumer yet: ${String(error)}`);
-        await sleep(1000);
       }
+      this.consuming = false;
+      this.joined = false;
+      this.assigned = [];
+      if (this.closing) return;
+      await consumer.close(true).catch(() => undefined);
+      await sleep(1000);
+      this.consumer = this.createConsumer();
     }
   }
 
   async close(): Promise<void> {
+    this.closing = true;
     await this.consumer.close(true);
     await this.producer.close();
   }
@@ -335,8 +411,10 @@ export class ConsumerRunner {
     } else {
       delivery.attempts = Number(headers.get('retry-attempt') ?? delivery.attempts + 1) - 1;
       // Wait until the record is due. Records on one retry topic share one delay, so they are due in order.
-      const wait = Number(headers.get('retry-due') ?? 0) - Date.now();
-      if (wait > 0) await sleep(wait);
+      // Loop: a timer can fire a millisecond early by Date.now(), and the
+      // record must never be retried before it is due.
+      const due = Number(headers.get('retry-due') ?? 0);
+      while (Date.now() < due) await sleep(due - Date.now());
     }
     delivery.partition = origin.partition;
     delivery.offset = origin.offset;
@@ -369,7 +447,8 @@ export class ConsumerRunner {
         });
         break;
       } else {
-        await sleep(retryBaseMs * 2 ** (delivery.attempts - 1));
+        const due = Date.now() + retryBaseMs * 2 ** (delivery.attempts - 1);
+        while (Date.now() < due) await sleep(due - Date.now());
       }
     }
     // Commit only now: the record is acked, in the DLT, or parked on a retry topic.

@@ -2,7 +2,6 @@ import { CDP_QUEUE } from '../../src/config.js';
 import { expect, test } from '../../src/fixtures.js';
 import { deliverInOrder, waitForDelivery } from '../../src/helpers/delivery.js';
 import { customersOnPartitions } from '../../src/helpers/kafka-placement.js';
-import { POLL } from '../../src/helpers/polling.js';
 
 /**
  * Kafka with non-blocking retries (KAFKA_RETRY_MODE=topics): a failing
@@ -49,14 +48,19 @@ test.describe('Kafka retry topics: the partition keeps moving', () => {
     await deliverInOrder(queues, [eventStream.customerCreated()]);
     await cdp.setFault(eventStream.customerId, 'fail-before-apply', 3);
     const placement = await queues.publishWithPlacement(eventStream.earned(10));
-    const committed = async () => {
-      const group = (await queues.consumerGroups()).find((g) => g.consumerGroup === CDP_QUEUE)!;
-      return BigInt(group.committedOffsets?.[String(placement.partition)] ?? '0');
+    // One sample = the committed offset and the delivery status read together.
+    // Wanted: committed past the record while it is still on its way through
+    // the retry topics (about 700 ms in total).
+    const sample = async () => {
+      const [groups, delivery] = await Promise.all([queues.consumerGroups(), queues.delivery(placement.messageId)]);
+      const group = groups.find((g) => g.consumerGroup === CDP_QUEUE)!;
+      const committed = BigInt(group.committedOffsets?.[String(placement.partition)] ?? '0');
+      if (delivery.status !== 'pending') return `finished (${delivery.status}) before the commit was seen`;
+      return committed > BigInt(placement.offset!) ? 'committed while still pending' : 'waiting';
     };
-
-    // Committed past the record while it is still on its way through the retry topics.
-    await expect.poll(committed, { ...POLL, message: 'committed after parking' }).toBeGreaterThan(BigInt(placement.offset!));
-    expect((await queues.delivery(placement.messageId)).status, 'not delivered yet').toBe('pending');
+    await expect
+      .poll(sample, { intervals: [10, 25, 50], timeout: 5_000, message: 'commit while the record is parked' })
+      .toBe('committed while still pending');
 
     const delivery = await waitForDelivery(queues, placement.messageId, 'delivered');
     expect(delivery.history.map((h) => h.outcome)).toEqual(['retry', 'retry', 'retry', 'ack']);

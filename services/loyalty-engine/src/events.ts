@@ -55,6 +55,8 @@ export class FanOutPublisher implements EventPublisher {
 export class BrokerRelay implements EventPublisher {
   private readonly pending: LoyaltyEvent[] = [];
   private draining = false;
+  private failedSends = 0;
+  private lastError: { message: string; at: string } | null = null;
 
   constructor(
     private readonly brokerUrl: string,
@@ -65,6 +67,22 @@ export class BrokerRelay implements EventPublisher {
   publish(event: LoyaltyEvent): void {
     this.pending.push(event);
     void this.drain();
+  }
+
+  status() {
+    return {
+      transport: 'http' as const,
+      pending: this.pending.length,
+      failedSends: this.failedSends,
+      lastError: this.lastError?.message ?? null,
+      lastErrorAt: this.lastError?.at ?? null,
+    };
+  }
+
+  private failed(message: string): void {
+    this.failedSends += 1;
+    this.lastError = { message: message.slice(0, 300), at: new Date().toISOString() };
+    console.error(`[loyalty-engine] ${message}`);
   }
 
   private async drain(): Promise<void> {
@@ -90,9 +108,9 @@ export class BrokerRelay implements EventPublisher {
         signal: AbortSignal.timeout(2000),
       });
       if (response.ok) return true;
-      console.error(`[loyalty-engine] broker refused event ${event.eventId}: ${response.status}`);
+      this.failed(`broker refused event ${event.eventId}: ${response.status}`);
     } catch (error) {
-      console.error(`[loyalty-engine] broker unreachable for event ${event.eventId}: ${String(error)}`);
+      this.failed(`broker unreachable for event ${event.eventId}: ${String(error)}`);
     }
     return false;
   }

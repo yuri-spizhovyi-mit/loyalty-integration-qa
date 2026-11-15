@@ -39,10 +39,11 @@ services:
     ports: ["9094:9094"]
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
-      interval: 3s
-      timeout: 10s
+      # The check starts a JVM, which is slow on a busy machine: generous limits.
+      interval: 5s
+      timeout: 30s
       retries: 30
-      start_period: 10s
+      start_period: 20s
 
   # One-shot: create the topics, then exit. Three partitions per topic so
   # ordering and head-of-line blocking per partition can be tested. The
@@ -72,13 +73,45 @@ services:
     depends_on:
       kafka-init: { condition: service_completed_successfully }
 
+  # Profiles and the outbox in SQLite on a volume: they survive a restart,
+  # and a second instance (below) shares them.
   customer-data-platform:
-    environment: *kafka-client
+    environment:
+      <<: *kafka-client
+      CDP_DB_PATH: /data/cdp.sqlite
+      CONSUMER_INSTANCE_ID: cdp-1
+    volumes: ["cdp-data:/data"]
     depends_on:
       kafka-init: { condition: service_completed_successfully }
 
+  # A second instance in the same consumer group, for the rebalance tests:
+  #   docker compose ... --profile scale up -d customer-data-platform-2
+  # It shares the SQLite file, and is reachable on localhost:3012.
+  customer-data-platform-2:
+    profiles: [scale]
+    image: loyalty-integration-qa/mock-service:local
+    restart: unless-stopped
+    init: true
+    environment:
+      <<: *kafka-client
+      SERVICE: customer-data-platform
+      PORT: "3002"
+      CDP_DB_PATH: /data/cdp.sqlite
+      CONSUMER_INSTANCE_ID: cdp-2
+    volumes: ["cdp-data:/data"]
+    ports: ["3012:3002"]
+    depends_on:
+      kafka-init: { condition: service_completed_successfully }
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3002/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
   notification-service:
-    environment: *kafka-client
+    environment:
+      <<: *kafka-client
+      CONSUMER_INSTANCE_ID: notifications-1
     depends_on:
       kafka-init: { condition: service_completed_successfully }
 
@@ -86,3 +119,6 @@ services:
     environment: *kafka-client
     depends_on:
       kafka-init: { condition: service_completed_successfully }
+
+volumes:
+  cdp-data:

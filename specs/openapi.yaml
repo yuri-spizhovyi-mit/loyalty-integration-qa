@@ -152,6 +152,21 @@ paths:
         '409': { $ref: '#/components/responses/Conflict' }
         '422': { $ref: '#/components/responses/BusinessRule' }
 
+  /internal/relay:
+    get:
+      operationId: getRelayStatus
+      tags: [internal]
+      description: |
+        The event relay that forwards outbox events to the bus (Kafka or the
+        in-memory broker). `pending` grows while the bus is unreachable and
+        drains once it is back; nothing is dropped.
+      responses:
+        '200':
+          description: Relay status
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RelayStatus' }
+
   /internal/outbox:
     get:
       operationId: listOutboxEvents
@@ -372,6 +387,20 @@ components:
         balance: { $ref: '#/components/schemas/Balance' }
         qualifyingPoints: { $ref: '#/components/schemas/Balance' }
         tier: { $ref: '#/components/schemas/Tier' }
+
+    RelayStatus:
+      type: object
+      required: [transport, pending, failedSends, lastError, lastErrorAt]
+      additionalProperties: false
+      properties:
+        transport: { enum: [kafka, http, none] }
+        pending: { type: integer, minimum: 0 }
+        failedSends: { type: integer, minimum: 0 }
+        lastError: { type: [string, 'null'] }
+        lastErrorAt:
+          oneOf:
+            - { $ref: '#/components/schemas/Timestamp' }
+            - { type: 'null' }
 
     OutboxEvents:
       type: object
