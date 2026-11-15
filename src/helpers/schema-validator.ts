@@ -7,11 +7,17 @@ import { parse } from 'yaml';
 /**
  * Validates payloads against the specs in `specs/`, which are the single
  * source of truth. Nothing here hard-codes a schema: response schemas are
- * looked up from the OpenAPI document by operationId and status code, and
+ * looked up from the OpenAPI documents by operationId and status code, and
  * event schemas from the AsyncAPI document by message name (= event type).
  */
 
-const OPENAPI_ID = 'https://specs.loyalty.local/openapi.json';
+/** The REST APIs with an OpenAPI document in specs/. */
+export type ApiName = 'loyalty' | 'cdp';
+
+const OPENAPI_FILES: Record<ApiName, { file: string; id: string }> = {
+  loyalty: { file: 'openapi.yaml', id: 'https://specs.loyalty.local/openapi.json' },
+  cdp: { file: 'cdp-openapi.yaml', id: 'https://specs.loyalty.local/cdp-openapi.json' },
+};
 const ASYNCAPI_ID = 'https://specs.loyalty.local/asyncapi.json';
 const HTTP_METHODS = ['get', 'post', 'put', 'patch', 'delete'] as const;
 
@@ -76,25 +82,36 @@ export class ContractValidator {
   private readonly compiled = new Map<string, ValidateFunction>();
 
   private constructor(
-    readonly openapi: OpenApiDoc,
+    readonly apis: Record<ApiName, OpenApiDoc>,
     readonly asyncapi: AsyncApiDoc,
   ) {
     this.ajv = new Ajv2020({ strict: true, allErrors: true, strictTypes: false });
     addFormats(this.ajv);
-    this.ajv.addSchema({ $id: OPENAPI_ID, $defs: rewriteRefs(openapi.components.schemas, OPENAPI_ID) });
+    for (const name of Object.keys(OPENAPI_FILES) as ApiName[]) {
+      const { id } = OPENAPI_FILES[name];
+      this.ajv.addSchema({ $id: id, $defs: rewriteRefs(apis[name].components.schemas, id) });
+    }
     this.ajv.addSchema({ $id: ASYNCAPI_ID, $defs: rewriteRefs(asyncapi.components.schemas, ASYNCAPI_ID) });
   }
 
   static load(): ContractValidator {
-    const openapi = parse(readFileSync(specPath('openapi.yaml'), 'utf8')) as OpenApiDoc;
-    const asyncapi = parse(readFileSync(specPath('asyncapi.yaml'), 'utf8')) as AsyncApiDoc;
-    return new ContractValidator(openapi, asyncapi);
+    const read = <T>(file: string) => parse(readFileSync(specPath(file), 'utf8')) as T;
+    const apis = {
+      loyalty: read<OpenApiDoc>(OPENAPI_FILES.loyalty.file),
+      cdp: read<OpenApiDoc>(OPENAPI_FILES.cdp.file),
+    };
+    return new ContractValidator(apis, read<AsyncApiDoc>('asyncapi.yaml'));
   }
 
-  /** Every operation in the OpenAPI document with its documented status codes. */
-  operations(): OperationInfo[] {
+  /** The loyalty engine's OpenAPI document. */
+  get openapi(): OpenApiDoc {
+    return this.apis.loyalty;
+  }
+
+  /** Every operation in one OpenAPI document with its documented status codes. */
+  operations(api: ApiName = 'loyalty'): OperationInfo[] {
     const result: OperationInfo[] = [];
-    for (const [path, item] of Object.entries(this.openapi.paths)) {
+    for (const [path, item] of Object.entries(this.apis[api].paths)) {
       for (const method of HTTP_METHODS) {
         const operation = item[method] as { operationId?: string; responses?: Json } | undefined;
         if (!operation) continue;
@@ -116,8 +133,9 @@ export class ContractValidator {
 
   validateResponse(operationId: string, status: number, body: unknown): ValidationResult {
     const against = `${operationId} ${status}`;
-    const operation = this.findOperation(operationId);
-    if (!operation) return { valid: false, against, errors: [`operation ${operationId} is not in openapi.yaml`] };
+    const found = this.findOperation(operationId);
+    if (!found) return { valid: false, against, errors: [`operation ${operationId} is not in any OpenAPI document`] };
+    const { operation, api } = found;
 
     const responses = (operation.responses ?? {}) as Record<string, Json>;
     let response = responses[String(status)];
@@ -129,25 +147,32 @@ export class ContractValidator {
       };
     }
     if (typeof response.$ref === 'string') {
-      response = this.openapi.components.responses[response.$ref.split('/').pop() as string] as Json;
+      response = this.apis[api].components.responses[response.$ref.split('/').pop() as string] as Json;
+    }
+    if (response.content === undefined) {
+      // A documented no-content response, e.g. 204.
+      return body === undefined
+        ? { valid: true, against, errors: [] }
+        : { valid: false, against, errors: ['response is documented without a body, but has one'] };
     }
     const schema = (response.content as Record<string, { schema: Json }> | undefined)?.['application/json']?.schema;
     if (!schema) return { valid: false, against, errors: ['response has no application/json schema'] };
-    return this.run(`response:${against}`, schema, OPENAPI_ID, body, against);
+    return this.run(`response:${against}`, schema, OPENAPI_FILES[api].id, body, against);
   }
 
   validateRequest(operationId: string, body: unknown): ValidationResult {
     const against = `${operationId} request`;
-    const operation = this.findOperation(operationId);
-    const requestBody = operation?.requestBody as { content?: Record<string, { schema: Json }> } | undefined;
+    const found = this.findOperation(operationId);
+    const requestBody = found?.operation.requestBody as { content?: Record<string, { schema: Json }> } | undefined;
     const schema = requestBody?.content?.['application/json']?.schema;
     if (!schema) return { valid: false, against, errors: [`${operationId} has no JSON request body schema`] };
-    return this.run(`request:${operationId}`, schema, OPENAPI_ID, body, against);
+    return this.run(`request:${operationId}`, schema, OPENAPI_FILES[found!.api].id, body, against);
   }
 
   /** Validates against a named OpenAPI component, e.g. "Error". */
-  validateComponent(name: string, body: unknown): ValidationResult {
-    return this.run(`component:${name}`, { $ref: `#/components/schemas/${name}` }, OPENAPI_ID, body, name);
+  validateComponent(name: string, body: unknown, api: ApiName = 'loyalty'): ValidationResult {
+    const ref = { $ref: `#/components/schemas/${name}` };
+    return this.run(`component:${api}:${name}`, ref, OPENAPI_FILES[api].id, body, name);
   }
 
   /** Picks the AsyncAPI message from the event's own `type` and validates the whole event. */
@@ -161,11 +186,14 @@ export class ContractValidator {
     return this.run(`event:${message.name}`, message.payload, ASYNCAPI_ID, event, against);
   }
 
-  private findOperation(operationId: string): Json | undefined {
-    for (const item of Object.values(this.openapi.paths)) {
-      for (const method of HTTP_METHODS) {
-        const operation = item[method];
-        if (operation && operation.operationId === operationId) return operation;
+  /** operationIds are unique across all OpenAPI documents (a spec test checks it). */
+  private findOperation(operationId: string): { operation: Json; api: ApiName } | undefined {
+    for (const api of Object.keys(this.apis) as ApiName[]) {
+      for (const item of Object.values(this.apis[api].paths)) {
+        for (const method of HTTP_METHODS) {
+          const operation = item[method];
+          if (operation && operation.operationId === operationId) return { operation, api };
+        }
       }
     }
     return undefined;

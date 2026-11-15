@@ -3,7 +3,8 @@ info:
   title: Loyalty engine events
   version: 1.0.0
   description: |
-    Events the loyalty engine publishes after each committed ledger write.
+    Events the loyalty engine publishes when a customer is created and after
+    each committed ledger write.
 
     Delivery is at least once, so consumers must deduplicate by `eventId`.
     `sequence` increases by one per customer, so a consumer can spot gaps and
@@ -14,6 +15,7 @@ channels:
   loyaltyEvents:
     address: loyalty.events
     messages:
+      CustomerCreated: { $ref: '#/components/messages/CustomerCreated' }
       PointsEarned: { $ref: '#/components/messages/PointsEarned' }
       PointsRedeemed: { $ref: '#/components/messages/PointsRedeemed' }
       PointsRefunded: { $ref: '#/components/messages/PointsRefunded' }
@@ -24,6 +26,7 @@ operations:
     action: send
     channel: { $ref: '#/channels/loyaltyEvents' }
     messages:
+      - { $ref: '#/channels/loyaltyEvents/messages/CustomerCreated' }
       - { $ref: '#/channels/loyaltyEvents/messages/PointsEarned' }
       - { $ref: '#/channels/loyaltyEvents/messages/PointsRedeemed' }
       - { $ref: '#/channels/loyaltyEvents/messages/PointsRefunded' }
@@ -31,6 +34,10 @@ operations:
 
 components:
   messages:
+    CustomerCreated:
+      name: customer.created
+      summary: A loyalty member was created. Always the first event (sequence 1) for a customer.
+      payload: { $ref: '#/components/schemas/CustomerCreated' }
     PointsEarned:
       name: points.earned
       summary: Points were added by an EARN entry.
@@ -70,7 +77,7 @@ components:
       required: [eventId, type, sequence, customerId, correlationId, occurredAt, data]
       properties:
         eventId: { type: string, format: uuid }
-        type: { enum: [points.earned, points.redeemed, points.refunded, tier.changed] }
+        type: { enum: [customer.created, points.earned, points.redeemed, points.refunded, tier.changed] }
         sequence: { type: integer, minimum: 1 }
         customerId: { $ref: '#/components/schemas/CustomerId' }
         correlationId: { type: string, minLength: 1, maxLength: 128 }
@@ -94,6 +101,24 @@ components:
           oneOf:
             - { $ref: '#/components/schemas/TransactionId' }
             - { type: 'null' }
+
+    CustomerCreated:
+      allOf: [{ $ref: '#/components/schemas/EventEnvelope' }]
+      additionalProperties: false
+      properties:
+        eventId: true
+        type: { const: customer.created }
+        sequence: { const: 1 }
+        customerId: true
+        correlationId: true
+        occurredAt: true
+        data:
+          type: object
+          required: [tier, marketingConsent]
+          additionalProperties: false
+          properties:
+            tier: { const: Bronze }
+            marketingConsent: { type: boolean }
 
     PointsEarned:
       allOf: [{ $ref: '#/components/schemas/EventEnvelope' }]

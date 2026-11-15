@@ -58,7 +58,7 @@ export function createApp(service: LoyaltyService, outbox: InMemoryEventLog) {
   });
 
   app.post('/customers', (req, res) => {
-    res.status(201).json(service.createCustomer(parseCreateCustomer(req.body)));
+    res.status(201).json(service.createCustomer(parseCreateCustomer(req.body), correlationIdOf(res)));
   });
 
   app.get('/customers/:customerId', (req, res) => {
@@ -109,7 +109,7 @@ export function createApp(service: LoyaltyService, outbox: InMemoryEventLog) {
   });
 
   app.use((req, _res, next) => {
-    next(new ApiError('NOT_FOUND',`No route for ${req.method} ${req.path}`));
+    next(new ApiError('NOT_FOUND', `No route for ${req.method} ${req.path}`));
   });
 
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {

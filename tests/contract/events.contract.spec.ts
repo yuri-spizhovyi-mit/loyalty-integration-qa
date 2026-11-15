@@ -1,6 +1,8 @@
 import { anEarn, aRedeem, aRefundOf, uniqueIdempotencyKey } from '../../src/builders/transaction-builder.js';
 import type { LoyaltyClient } from '../../src/clients/loyalty-client.js';
+import { aCustomer } from '../../src/builders/customer-builder.js';
 import type {
+  CustomerCreatedData,
   LedgerResponse,
   LoyaltyEvent,
   OutboxResponse,
@@ -21,7 +23,7 @@ async function outbox(loyalty: LoyaltyClient, customerId: string): Promise<Loyal
 }
 
 /**
- * Earn 1200 (Bronze -> Silver), redeem 100, refund 300 of the earn
+ * Customer created, then earn 1200 (Bronze -> Silver), redeem 100, refund 300 of the earn
  * (qualifying 900: Silver -> Bronze). Publishes every event type.
  */
 async function fullLifecycle(loyalty: LoyaltyClient, customerId: string) {
@@ -44,6 +46,7 @@ test.describe('Events match asyncapi.yaml', () => {
     const events = await fullLifecycle(loyalty, customer.customerId);
 
     expect(events.map((event) => event.type)).toEqual([
+      'customer.created',
       'points.earned',
       'tier.changed',
       'points.redeemed',
@@ -76,9 +79,7 @@ test.describe('Events match asyncapi.yaml', () => {
     const events = await fullLifecycle(loyalty, customer.customerId);
     const ledger = await readJson<LedgerResponse>(await loyalty.getLedger(customer.customerId));
 
-    const transactionEvents = events.filter(
-      (event) => event.type !== 'tier.changed',
-    ) as unknown as LoyaltyEvent<TransactionEventData>[];
+    const transactionEvents = events.filter((event) => event.type.startsWith('points.')) as unknown as LoyaltyEvent<TransactionEventData>[];
     expect(transactionEvents).toHaveLength(ledger.entries.length);
     for (const event of transactionEvents) {
       const entry = ledger.entries.find((candidate) => candidate.transactionId === event.data.transactionId);
@@ -113,12 +114,27 @@ test.describe('Events match asyncapi.yaml', () => {
     ]);
   });
 
-  test('rejected requests publish nothing', async ({ loyalty, customer }) => {
+  test('customer.created is the first event and carries the consent flag', async ({ loyalty, createCustomer }) => {
+    const { customerId } = await createCustomer(aCustomer().withMarketingConsent(true).build());
+
+    const events = await outbox(loyalty, customerId);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: 'customer.created', sequence: 1, customerId });
+    expect(events[0]?.data as unknown as CustomerCreatedData).toEqual({ tier: 'Bronze', marketingConsent: true });
+  });
+
+  test('a rejected customer creation publishes nothing', async ({ loyalty, customer }) => {
+    await expect(await loyalty.createCustomer({ customerId: customer.customerId })).toHaveStatus(409);
+
+    expect((await outbox(loyalty, customer.customerId)).map((event) => event.type)).toEqual(['customer.created']);
+  });
+
+  test('rejected transactions publish nothing', async ({ loyalty, customer }) => {
     await loyalty.earn(customer.customerId, { points: 0 });
     await loyalty.redeem(customer.customerId, aRedeem().points(10).build());
     await loyalty.refund(customer.customerId, aRefundOf('txn_unknown').build());
 
-    expect(await outbox(loyalty, customer.customerId)).toEqual([]);
+    expect((await outbox(loyalty, customer.customerId)).map((event) => event.type)).toEqual(['customer.created']);
   });
 
   test('an idempotent replay publishes nothing extra', async ({ loyalty, customer }) => {
@@ -128,6 +144,6 @@ test.describe('Events match asyncapi.yaml', () => {
     await loyalty.earn(customer.customerId, request, { idempotencyKey: key });
     await loyalty.earn(customer.customerId, request, { idempotencyKey: key });
 
-    expect((await outbox(loyalty, customer.customerId)).map((event) => event.type)).toEqual(['points.earned']);
+    expect((await outbox(loyalty, customer.customerId)).map((event) => event.type)).toEqual(['customer.created', 'points.earned']);
   });
 });

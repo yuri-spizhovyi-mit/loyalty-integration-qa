@@ -1,12 +1,15 @@
 import { randomUUID } from 'node:crypto';
-import { type APIRequestContext, test as base } from '@playwright/test';
-import { aCustomer } from './builders/customer-builder.js';
+import { type APIRequest, type APIRequestContext, test as base } from '@playwright/test';
+import { aCustomer, uniqueCustomerId } from './builders/customer-builder.js';
+import { anEventStream, type EventStream } from './builders/event-builder.js';
 import { anEarn } from './builders/transaction-builder.js';
+import { CdpClient } from './clients/cdp-client.js';
 import { LoyaltyClient } from './clients/loyalty-client.js';
 import type { CreateCustomerBody, TransactionResponse } from './clients/loyalty-types.js';
 import { config } from './config.js';
 import { readJson } from './helpers/json.js';
 import { expect } from './helpers/matchers.js';
+import { QueueInspector } from './helpers/queue-inspector.js';
 import { getContract } from './helpers/schema-validator.js';
 
 interface Fixtures {
@@ -20,6 +23,16 @@ interface Fixtures {
   customer: CreateCustomerBody;
   /** Setup step: earn points and fail fast (with context) if that does not work. */
   earnPoints: (customerId: string, points: number) => Promise<TransactionResponse>;
+  /** Customer data platform client; responses checked against cdp-openapi.yaml. */
+  cdp: CdpClient;
+  /** Publishes straight to the broker and inspects deliveries and dead letters. */
+  queues: QueueInspector;
+  /**
+   * Builds events for a synthetic customer that exists only in the event
+   * stream (not in the engine), for consumer tests that publish to the broker
+   * directly. Any fault injected for that customer is cleared afterwards.
+   */
+  eventStream: EventStream;
   /** Prints the correlation and customer IDs when a test fails. */
   failureContext: void;
 }
@@ -32,10 +45,7 @@ export const test = base.extend<Fixtures>({
   },
 
   loyaltyApi: async ({ playwright, correlationId }, use) => {
-    const context = await playwright.request.newContext({
-      baseURL: config.loyaltyUrl,
-      extraHTTPHeaders: { 'X-Correlation-ID': correlationId, Accept: 'application/json' },
-    });
+    const context = await apiContext(playwright.request, config.loyaltyUrl, correlationId);
     await use(context);
     await context.dispose();
   },
@@ -56,6 +66,25 @@ export const test = base.extend<Fixtures>({
 
   customer: async ({ createCustomer }, use) => {
     await use(await createCustomer());
+  },
+
+  cdp: async ({ playwright, correlationId }, use) => {
+    const context = await apiContext(playwright.request, config.cdpUrl, correlationId);
+    await use(new CdpClient(context, getContract()));
+    await context.dispose();
+  },
+
+  queues: async ({ playwright, correlationId }, use) => {
+    const context = await apiContext(playwright.request, config.brokerUrl, correlationId);
+    await use(new QueueInspector(context));
+    await context.dispose();
+  },
+
+  eventStream: async ({ cdp, correlationId }, use, testInfo) => {
+    const customerId = uniqueCustomerId('evt');
+    testInfo.annotations.push({ type: 'customerId', description: customerId });
+    await use(anEventStream(customerId, correlationId));
+    await cdp.clearFault(customerId);
   },
 
   earnPoints: async ({ loyalty }, use) => {
@@ -81,5 +110,16 @@ export const test = base.extend<Fixtures>({
     { auto: true },
   ],
 });
+
+function apiContext(
+  request: APIRequest,
+  baseURL: string,
+  correlationId: string,
+): Promise<APIRequestContext> {
+  return request.newContext({
+    baseURL,
+    extraHTTPHeaders: { 'X-Correlation-ID': correlationId, Accept: 'application/json' },
+  });
+}
 
 export { expect };

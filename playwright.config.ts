@@ -3,8 +3,18 @@ import { config } from './src/config.js';
 
 const isCI = Boolean(process.env.CI);
 // When LOYALTY_URL is set the stack is already running (Docker Compose, a
-// shared environment); otherwise Playwright starts the mock service itself.
+// shared environment); otherwise Playwright starts the mock services itself.
 const startServices = !process.env.LOYALTY_URL;
+
+const service = (name: string, url: string, env: Record<string, string> = {}) => ({
+  command: `npm run start:${name}`,
+  url: `${url}/health`,
+  env,
+  reuseExistingServer: !isCI,
+  timeout: 30_000,
+  stdout: 'ignore' as const,
+  stderr: 'pipe' as const,
+});
 
 export default defineConfig({
   testDir: 'tests',
@@ -20,17 +30,15 @@ export default defineConfig({
   projects: [
     { name: 'contract', testDir: 'tests/contract' },
     { name: 'api', testDir: 'tests/api', dependencies: ['contract'] },
+    { name: 'events', testDir: 'tests/events', dependencies: ['contract'] },
   ],
+  // Start order does not matter: the engine's relay retries until the broker
+  // is up, and the broker retries until the customer data platform is up.
   webServer: startServices
     ? [
-        {
-          command: 'npm run start:loyalty',
-          url: `${config.loyaltyUrl}/health`,
-          reuseExistingServer: !isCI,
-          timeout: 30_000,
-          stdout: 'ignore',
-          stderr: 'pipe',
-        },
+        service('broker', config.brokerUrl, { CDP_URL: config.cdpUrl }),
+        service('cdp', config.cdpUrl),
+        service('loyalty', config.loyaltyUrl, { BROKER_URL: config.brokerUrl }),
       ]
     : undefined,
 });

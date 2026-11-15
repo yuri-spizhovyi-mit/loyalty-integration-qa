@@ -30,11 +30,17 @@ export class LoyaltyService {
     private readonly options: ServiceOptions,
   ) {}
 
-  createCustomer(request: CreateCustomerRequest) {
+  createCustomer(request: CreateCustomerRequest, correlationId: string) {
     if (this.store.getCustomer(request.customerId)) {
       throw new ApiError('CUSTOMER_ALREADY_EXISTS', `Customer ${request.customerId} already exists`);
     }
     this.store.addCustomer({ ...request, createdAt: new Date().toISOString() });
+    // Every customer starts in Bronze with a zero balance; downstream systems
+    // build the profile from this event.
+    this.publish('customer.created', request.customerId, correlationId, {
+      tier: tierFor(0),
+      marketingConsent: request.marketingConsent,
+    });
     return this.customerSummary(request.customerId);
   }
 

@@ -1,5 +1,5 @@
 import { type APIResponse, expect as baseExpect } from '@playwright/test';
-import { getContract, type ValidationResult } from './schema-validator.js';
+import { type ApiName, getContract, type ValidationResult } from './schema-validator.js';
 
 const MAX_BODY_CHARS = 2000;
 
@@ -75,9 +75,11 @@ export const expect = baseExpect.extend({
 
   /** `await expect(response).toMatchContract('earnPoints')`: body vs the OpenAPI schema for its status. */
   async toMatchContract(response: APIResponse, operationId: string) {
+    // An empty body stays undefined so documented no-content responses (204) validate.
+    const text = await response.text();
     let body: unknown;
     try {
-      body = await response.json();
+      body = text.length > 0 ? JSON.parse(text) : undefined;
     } catch {
       body = '(not JSON)';
     }
@@ -103,8 +105,8 @@ export const expect = baseExpect.extend({
   },
 
   /** `expect(body).toMatchSchema('Error')`: validates against a named OpenAPI component. */
-  toMatchSchema(payload: unknown, componentName: string) {
-    const result = getContract().validateComponent(componentName, payload);
+  toMatchSchema(payload: unknown, componentName: string, api: ApiName = 'loyalty') {
+    const result = getContract().validateComponent(componentName, payload, api);
     return {
       pass: result.valid,
       name: 'toMatchSchema',

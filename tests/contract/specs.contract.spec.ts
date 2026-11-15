@@ -70,6 +70,23 @@ test.describe('Specs', () => {
     }
   });
 
+  test('operationIds are unique across all OpenAPI documents', () => {
+    const ids = [...contract.operations('loyalty'), ...contract.operations('cdp')].map((op) => op.operationId);
+    expect(ids.filter((id, index) => ids.indexOf(id) !== index)).toEqual([]);
+  });
+
+  test('shared definitions are identical in cdp-openapi.yaml and openapi.yaml', () => {
+    const rules = (schema: unknown) => {
+      const { description: _ignored, ...rest } = (schema ?? {}) as Record<string, unknown>;
+      return rest;
+    };
+    for (const name of ['CustomerId', 'TransactionId', 'Timestamp']) {
+      expect(rules(contract.apis.cdp.components.schemas[name]), name).toEqual(
+        rules(contract.openapi.components.schemas[name]),
+      );
+    }
+  });
+
   test('shared definitions are identical in openapi.yaml and asyncapi.yaml', () => {
     // The REST API and the events describe the same IDs and tiers. If the two
     // specs drift apart, a consumer can accept an event the API would reject.
@@ -161,6 +178,16 @@ test.describe('Validator self-test: known-bad payloads fail', () => {
       expect(contract.validateEvent(JSON.parse(JSON.stringify(event))).valid).toBe(false);
     });
   }
+
+  test('customer.created with a sequence other than 1 is rejected', () => {
+    const event = {
+      ...validEarnedEvent,
+      type: 'customer.created',
+      sequence: 2,
+      data: { tier: 'Bronze', marketingConsent: false },
+    };
+    expect(contract.validateEvent(event).errors.join('\n')).toMatch(/\/sequence must be equal to constant/);
+  });
 
   test('a tier.changed event with an invalid direction is rejected', () => {
     const event = {

@@ -1,0 +1,229 @@
+openapi: 3.1.0
+info:
+  title: Customer data platform (mock)
+  version: 1.0.0
+  description: |
+    Builds customer profiles from loyalty events. The broker pushes each event
+    to `POST /events`; the answer tells it what to do next:
+
+    - 200: acknowledged (applied, or a duplicate that was ignored).
+    - 400: the event will never be accepted; dead-letter it without retrying.
+    - 503: temporary failure; retry later.
+
+    Field mapping from events to profile attributes:
+
+    | Event | Event field | Profile attribute |
+    |---|---|---|
+    | customer.created | customerId | profileId |
+    | customer.created | data.tier ("Bronze") | attributes.loyalty_tier ("bronze") |
+    | customer.created | data.marketingConsent | attributes.marketing_consent |
+    | customer.created | occurredAt | attributes.member_since |
+    | customer.created | (new member) | attributes.points_balance = 0 |
+    | tier.changed | data.newTier ("Gold") | attributes.loyalty_tier ("gold") |
+    | points.* | data.balanceAfter | attributes.points_balance |
+    | points.* | data.transactionId | attributes.last_transaction_id |
+    | points.* | data.entryType ("EARN") | attributes.last_transaction_type ("earn") |
+    | any | occurredAt | attributes.last_activity_at |
+
+servers:
+  - url: http://localhost:3002
+
+paths:
+  /health:
+    get:
+      operationId: getCdpHealth
+      responses:
+        '200':
+          description: Service is up
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Health' }
+
+  /events:
+    post:
+      operationId: receiveEvent
+      summary: Push endpoint for the broker
+      requestBody:
+        required: true
+        description: A message defined in asyncapi.yaml
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '200':
+          description: Acknowledged
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EventAck' }
+        '400':
+          description: Malformed or invalid event; do not retry
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: Temporary failure; retry
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /profiles/{profileId}:
+    get:
+      operationId: getProfile
+      parameters:
+        - name: profileId
+          in: path
+          required: true
+          schema: { $ref: '#/components/schemas/CustomerId' }
+      responses:
+        '200':
+          description: The profile
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Profile' }
+        '404':
+          description: No event for this customer has been applied yet
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /internal/faults/{customerId}:
+    parameters:
+      - name: customerId
+        in: path
+        required: true
+        schema: { type: string }
+    put:
+      operationId: setFault
+      summary: Test only. Fail the next deliveries for one customer.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FaultRequest' }
+      responses:
+        '204': { description: Fault set }
+        '400':
+          description: Invalid fault
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    delete:
+      operationId: clearFault
+      summary: Test only. Remove the fault for one customer.
+      responses:
+        '204': { description: Fault cleared }
+
+components:
+  schemas:
+    CustomerId:
+      type: string
+      pattern: '^[A-Za-z0-9_-]{3,64}$'
+    TransactionId:
+      type: string
+      pattern: '^txn_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    Timestamp:
+      type: string
+      format: date-time
+      pattern: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$'
+
+    Health:
+      type: object
+      required: [status, service]
+      additionalProperties: false
+      properties:
+        status: { const: ok }
+        service: { const: customer-data-platform }
+
+    EventAck:
+      type: object
+      required: [eventId, result]
+      additionalProperties: false
+      properties:
+        eventId: { type: string, format: uuid }
+        result: { enum: [applied, duplicate] }
+
+    Profile:
+      type: object
+      required: [profileId, attributes, sync]
+      additionalProperties: false
+      properties:
+        profileId: { $ref: '#/components/schemas/CustomerId' }
+        attributes:
+          description: Null until an event that sets the attribute has been applied.
+          type: object
+          required:
+            - loyalty_tier
+            - points_balance
+            - marketing_consent
+            - member_since
+            - last_transaction_id
+            - last_transaction_type
+            - last_activity_at
+          additionalProperties: false
+          properties:
+            loyalty_tier: { enum: [bronze, silver, gold, null] }
+            points_balance:
+              oneOf:
+                - { type: integer, minimum: 0 }
+                - { type: 'null' }
+            marketing_consent: { type: [boolean, 'null'] }
+            member_since:
+              oneOf:
+                - { $ref: '#/components/schemas/Timestamp' }
+                - { type: 'null' }
+            last_transaction_id:
+              oneOf:
+                - { $ref: '#/components/schemas/TransactionId' }
+                - { type: 'null' }
+            last_transaction_type: { enum: [earn, redeem, refund, null] }
+            last_activity_at:
+              oneOf:
+                - { $ref: '#/components/schemas/Timestamp' }
+                - { type: 'null' }
+        sync:
+          type: object
+          required: [lastSequence, appliedEvents, duplicateEvents, outOfOrderEvents, missingSequences, updatedAt]
+          additionalProperties: false
+          properties:
+            lastSequence: { type: integer, minimum: 0 }
+            appliedEvents: { type: integer, minimum: 0 }
+            duplicateEvents: { type: integer, minimum: 0 }
+            outOfOrderEvents: { type: integer, minimum: 0 }
+            missingSequences:
+              description: Sequences below lastSequence that have not arrived (at most 100 listed).
+              type: array
+              maxItems: 100
+              items: { type: integer, minimum: 1 }
+            updatedAt: { $ref: '#/components/schemas/Timestamp' }
+
+    FaultRequest:
+      type: object
+      required: [mode, times]
+      additionalProperties: false
+      properties:
+        mode: { enum: [fail-before-apply, fail-after-apply] }
+        times: { type: integer, minimum: 1, maximum: 1000 }
+
+    Error:
+      type: object
+      required: [error, correlationId]
+      additionalProperties: false
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          additionalProperties: false
+          properties:
+            code:
+              enum:
+                - MALFORMED_JSON
+                - INVALID_EVENT
+                - UNKNOWN_EVENT_TYPE
+                - PROFILE_NOT_FOUND
+                - VALIDATION_ERROR
+                - INJECTED_FAULT
+                - NOT_FOUND
+                - INTERNAL_ERROR
+            message: { type: string }
+            details: { type: array, items: { type: string } }
+        correlationId: { type: [string, 'null'] }

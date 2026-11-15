@@ -1,14 +1,10 @@
 import type { APIRequestContext, APIResponse } from '@playwright/test';
+import { checkedResponse } from '../helpers/contract-check.js';
 import type { ContractValidator } from '../helpers/schema-validator.js';
 import type { CreateCustomerBody, PointsBody, RefundBody } from './loyalty-types.js';
 
 export interface WriteOptions {
   idempotencyKey?: string;
-}
-
-/** Thrown when a response does not match openapi.yaml. */
-export class ContractViolationError extends Error {
-  override name = 'ContractViolationError';
 }
 
 /**
@@ -68,7 +64,9 @@ export class LoyaltyClient {
   postRaw(operationId: string, path: string, rawBody: string): Promise<APIResponse> {
     return this.checked(
       operationId,
-      this.request.post(path, { data: rawBody, headers: { 'Content-Type': 'application/json' } }),
+      // A Buffer, not a string: Playwright JSON-encodes a string that is not
+      // valid JSON, which would turn malformed input into a valid JSON string.
+      this.request.post(path, { data: Buffer.from(rawBody), headers: { 'Content-Type': 'application/json' } }),
     );
   }
 
@@ -82,31 +80,7 @@ export class LoyaltyClient {
     );
   }
 
-  private async checked(operationId: string, pending: Promise<APIResponse>): Promise<APIResponse> {
-    const response = await pending;
-    if (!this.contract) return response;
-
-    let body: unknown;
-    try {
-      body = await response.json();
-    } catch {
-      body = undefined;
-    }
-    const result =
-      body === undefined
-        ? { valid: false, against: `${operationId} ${response.status()}`, errors: ['response body is not JSON'] }
-        : this.contract.validateResponse(operationId, response.status(), body);
-    if (!result.valid) {
-      throw new ContractViolationError(
-        [
-          `Response does not match openapi.yaml (${result.against})`,
-          ...result.errors.map((error) => `  - ${error}`),
-          `  url:           ${response.url()}`,
-          `  correlationId: ${response.headers()['x-correlation-id'] ?? '(none)'}`,
-          `  body:          ${(await response.text()).slice(0, 2000)}`,
-        ].join('\n'),
-      );
-    }
-    return response;
+  private checked(operationId: string, pending: Promise<APIResponse>): Promise<APIResponse> {
+    return checkedResponse(this.contract, operationId, pending);
   }
 }
