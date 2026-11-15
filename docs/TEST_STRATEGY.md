@@ -5,7 +5,7 @@ This document covers how the loyalty integration is tested: what is in scope, wh
 The system under test is described in the [README](../README.md). It has four mock services:
 
 - the **loyalty engine** (REST, ledger, tiers);
-- a **broker** with retries and dead-letter queues;
+- a **message bus** with retries and dead-letter queues: either an in-memory broker or **Kafka** (§7.5);
 - the **customer data platform** (CDP), which builds customer profiles from events;
 - the **notification service**, which records tier-change messages.
 
@@ -24,7 +24,8 @@ The specs in [`specs/`](../specs) describe each service's API or events and are 
 | Event reliability | Duplicates, out-of-order delivery, lost acknowledgements, retries with backoff, dead-letter queues and redrive |
 | Data integrity | Ledger reconciliation (sum of entries = balance), engine ↔ outbox ↔ profile reconciliation, field mapping per row |
 | Notifications | Exactly one per tier change, none without consent, none for failed transactions |
-| Delivery pipeline | The same suite runs against Docker Compose in GitHub Actions on every push to `main`, every pull request and nightly |
+| Kafka | Partitioning by key, order within a partition, head-of-line blocking during retries, offsets committed only after handling, dead-letter topic records |
+| Delivery pipeline | The same suite runs in GitHub Actions against Docker Compose on both buses (in-memory and Kafka): on every push to `main`, every pull request and nightly |
 
 ### Out of scope
 
@@ -32,7 +33,7 @@ The specs in [`specs/`](../specs) describe each service's API or events and are 
 - **Authentication and authorisation.** The mocks have none. Only one rule is tested: a customer cannot refund another customer's transaction.
 - **Performance and load.** The parallel tests check correctness under contention, not throughput or latency percentiles. The timing limits used (see §7.1) are sanity checks on a single machine, not service-level objectives.
 - **Persistence and recovery.** State is in memory, so restarts, data migration and backup are not covered.
-- **Real infrastructure.** No RabbitMQ (see §7.5), no real vendor APIs, no network faults beyond what the broker and fault injection simulate.
+- **Real infrastructure beyond one Kafka broker.** Kafka runs as a single node, so replication, broker failover and multi-broker rebalancing are not covered. There are no real vendor APIs, and no network faults beyond what the bus and fault injection simulate.
 - **UI.** There is none; the tests use Playwright's `APIRequestContext` only.
 
 ## 2. Quality risks
@@ -54,12 +55,13 @@ The tests are prioritised by risk: what goes wrong in loyalty integrations, and 
 | R11 | A message goes to a customer without marketing consent | Regulatory exposure (consent law), complaints | `tests/notifications/*` |
 | R12 | A customer gets no message, or two, for one tier change | Poor experience, support load | `tests/notifications/*` |
 | R13 | A failed transaction still triggers downstream effects | Profile and messages disagree with the ledger | "failed transactions publish nothing" and "failed transactions send nothing" |
+| R14 | Kafka specifics break an assumption: a customer's events land on different partitions and lose their order, an offset is committed before the record is handled (lost on a crash), or a dead-letter record cannot be traced back | Out-of-order profiles, silently lost events, dead letters nobody can redrive | `tests/kafka/kafka-semantics.spec.ts` |
 
 ## 3. Test approach
 
 ### Layers
 
-The suite has five Playwright projects. `contract` runs first, and the others depend on it (§7.2).
+The suite has six Playwright projects. `contract` runs first, and the others depend on it (§7.2). The `kafka` project exists only when the stack runs on Kafka. It runs last, one test at a time (§7.11).
 
 | Project | Folder | Tests | Purpose |
 |---|---:|---:|---|
@@ -68,7 +70,8 @@ The suite has five Playwright projects. `contract` runs first, and the others de
 | events | `tests/events` | 29 | Profile sync end to end; duplicates; ordering; retries and dead-letter queue |
 | integrity | `tests/integrity` | 35 | Ledger reconciliation, cross-system reconciliation, field mapping per row, self-test of the checker |
 | notifications | `tests/notifications` | 20 | Notification triggers end to end, and exactly-once behaviour under faults |
-| **Total** | | **320** | |
+| kafka | `tests/kafka` | 7 | Kafka only: keys and partitions, head-of-line blocking, commit-after-handling, consumer lag, dead-letter topic records |
+| **Total** | | **320 + 7** | 320 on the in-memory broker; 327 on Kafka, where the first 320 run unchanged |
 
 ### Test design techniques
 
@@ -79,7 +82,7 @@ The suite has five Playwright projects. `contract` runs first, and the others de
 - **Fault injection.** Test-only endpoints make the CDP or the notification service fail for one customer, either before processing (an outage) or after it (a lost acknowledgement). This drives the retry, duplicate and DLQ paths on purpose instead of waiting for them to happen.
 - **Seeded random runs.** Ledger reconciliation runs random mixes of earns, redeems, refunds and retries with fixed seeds, so a failure can be replayed exactly. The seed is in the test title, and the operation log is attached to the report.
 - **Independent oracles.** Expected tiers and ledger rules are written in the test code from the business rules (`src/helpers/reconciliation.ts`), never imported from the services.
-- **Mutation testing (manual).** Bugs were injected into the services one at a time to show the tests catch them. Examples: no deduplication, last-arrival-wins, consent ignored, unknown consent treated as consent, publishing after the acknowledgement, a wrong `balanceAfter`, tier not lower-cased. All 14 were caught. This is not automated yet (§9).
+- **Mutation testing (manual).** Bugs were injected into the services one at a time to show the tests catch them. Examples: no deduplication, last-arrival-wins, consent ignored, unknown consent treated as consent, publishing after the acknowledgement, a wrong `balanceAfter`, tier not lower-cased. Four more were Kafka-specific: committing before handling, losing per-partition order, a random key instead of the customer ID, and a dead-letter record without its source placement. All 18 were caught. This is not automated yet (§9).
 
 ### Framework structure
 
@@ -91,8 +94,9 @@ The suite has five Playwright projects. `contract` runs first, and the others de
 ## 4. Test environment and data
 
 - **Two ways to run the stack.**
-  - With `LOYALTY_URL` unset, Playwright starts the four services itself. This is the fast local loop.
+  - With `LOYALTY_URL` unset, Playwright starts the four services itself, on the in-memory broker. This is the fast local loop.
   - With `LOYALTY_URL` set, it uses a stack that is already running. This is how CI uses Docker Compose, and how the suite would run against a shared test environment.
+- **Two message buses.** `docker-compose.yml` runs on the in-memory broker. Adding `docker-compose.kafka.yml` runs a single-node Kafka (KRaft) and a one-shot job that creates the topics: `loyalty.events`, `profile.events` and a dead-letter topic per consumer group, each with 3 partitions. On Kafka the services produce and consume directly, and the broker service becomes the tests' inspection API over Kafka, with the same HTTP endpoints. The tests run with `BUS=kafka` to add the Kafka project.
 - **Isolation by data, not by environment.** Every test creates its own customer with a unique ID (`qa-<time>-<random>`), so tests run fully in parallel against shared services and need no cleanup. Consumer tests that publish to the broker directly use synthetic `evt-` customers that exist only in the event stream.
 - **Traceability.** Every test sends its own `X-Correlation-ID`. It flows through the engine, the events, the broker and the notification. On failure, the correlation ID and customer IDs are printed and attached to the report, so the run can be found in the service logs.
 - **Test-only endpoints** are kept apart from the public API: `/internal/outbox` (published events) and `/internal/faults` (fault injection), marked as test-only in the specs. They are contract-tested like every other endpoint, and so are the notification decisions. The broker is test infrastructure with no spec, so its inspection endpoints are not contract-checked.
@@ -108,7 +112,7 @@ The suite has five Playwright projects. `contract` runs first, and the others de
 
 ### Exit criteria (a change may be merged or released)
 
-1. All tests pass on the pull request and on `main`, with **zero retries** (§7.3).
+1. All tests pass on the pull request and on `main`, on both buses, with **zero retries** (§7.3).
 2. No test is skipped, except by the coverage guards on purpose. CI uses `forbidOnly`, so a stray `test.only` fails the run.
 3. The nightly run, which repeats every test 3 times, has been green since the change was merged. A failure there is treated as a defect (a flaky test or a race in the system), not ignored.
 4. Every new endpoint, response status, event type or field mapping has its row in a spec, and the coverage tests prove it is exercised. They fail when a documented response or a mapping row has no test.
@@ -199,9 +203,18 @@ The services are small, but they implement the behaviour that makes integrations
 
 The trade-off is that a mock can only have the failure modes someone thought to build into it. Against real systems, the same tests would run unchanged, as the `LOYALTY_URL` mode shows. The fault-injection tests would need the real systems' own ways to cause failures.
 
-### 7.5 In-memory broker instead of RabbitMQ
+### 7.5 Two buses: an in-memory broker and Kafka
 
-The broker is in memory and pushes messages over HTTP. It is quick to start, has no dependencies, and is easy to inspect: per-message delivery history and dead-letter queues are exposed over REST. It does not test RabbitMQ-specific behaviour such as prefetch, connection loss or exchange configuration. Because the tests talk to the broker only through `QueueInspector`, a RabbitMQ-backed implementation could replace it without changing the tests.
+The in-memory broker pushes messages over HTTP. It starts instantly, needs no Docker, and keeps the local loop fast. On Kafka, the services produce and consume records themselves. The two keep the same delivery rules: at least once, retries with backoff, and a dead-letter destination.
+
+The tests never talk to Kafka directly. They use the broker service's HTTP API through `QueueInspector`, and on Kafka that service is a view over the topics:
+- it produces records the way a service would;
+- it indexes every topic and dead-letter topic;
+- it asks each consumer what it did with a record.
+
+Its reads catch up to the topics' end offsets before answering, so a record a service produced just before the request is included. That design was tested for real when the first 320 tests passed on Kafka without a single change. The cost is that the inspection API is code of its own, and could hide a Kafka problem behind a bug of its own. The Kafka project checks Kafka's own properties against the records' real partitions and offsets.
+
+A RabbitMQ variant would plug in the same way. It was skipped in favour of Kafka, which is the bus this kind of integration usually runs on.
 
 ### 7.6 Hand-written validation in the services
 
@@ -223,15 +236,24 @@ A downgrade sends a `tier-downgrade` notification. The README only requires upgr
 
 The random ledger runs use three fixed seeds instead of a new random seed each time. A fixed seed always replays the same run, so a failure can be reproduced; a new seed each run explores more histories but can fail without a way to replay it. Adding a nightly job with a random seed, printed in the report, would combine both.
 
+### 7.11 Blocking retries, and the noisy-neighbour effect
+
+The Kafka consumers retry a failing record in place, so its partition waits until the record is acknowledged or dead-lettered. That keeps each customer's events in order, because a later event can never overtake a retried one. The cost is head-of-line blocking: every other customer on the same partition waits too.
+
+The alternative is retry topics: move the failing record to a `retry-1`, `retry-2` … topic and keep the partition moving. That removes the blocking but gives up per-customer order, so the consumer has to cope with it. The CDP can, thanks to sequence versioning (§7.7), so this is a real option. The blocking design was kept because it is simpler and easier to reason about.
+
+The tests ran into this effect themselves. The head-of-line test failed 2 times in 6 when parallel copies of it, or other tests with injected faults, blocked the "other" partition too; with 3 partitions, a few parallel faults cover them all. Run alone, it passed every time. So the `kafka` project runs after all the others, with one worker. A side effect: Playwright does not repeat projects that another project depends on, so the nightly Kafka run is split into two runs to repeat everything.
+
 ## 8. Reporting and defect handling
 
-- **Reports.** Every CI run uploads the Playwright HTML report as an artifact. A failed run also uploads the raw test results and the logs of all four containers. In CI, failures are also annotated on the commit, and a JUnit file is written for tools that read one.
+- **Reports.** Every CI run uploads the Playwright HTML report as an artifact, one per bus. A failed run also uploads the raw test results and the logs of all four containers. In CI, failures are also annotated on the commit, and a JUnit file is written for tools that read one.
 - **Failure context.** Each failure shows the correlation ID and customer IDs, the response body and URL, and, for schema failures, every violated rule with its path. That is usually enough to find the run in the service logs without rerunning it.
 - **Defects.** Each defect gets a regression test that fails before the fix. When a test turns out to be wrong instead, it is fixed and the cause is recorded in the commit message. An example from step 4: Playwright JSON-encodes a string body that is not valid JSON, so a "malformed JSON" test had been sending valid JSON.
 
 ## 9. Known gaps and next steps
 
-- **RabbitMQ through Docker Compose**: implement the broker interface on RabbitMQ and run the event projects against both.
+- **Non-blocking retries on Kafka** (retry topics), with tests showing the partition keeps moving while order is restored by sequence versioning (§7.11).
+- **Kafka failure modes beyond one node**: broker restart, consumer group rebalancing with several instances, and a schema registry for message contracts.
 - **Automated mutation testing** (for example Stryker) on the services, in place of the manual runs described in §3.
 - **Consumer-driven contracts** between the real teams, so a provider change is checked against what each consumer actually uses.
 - **A consent-change event**, and tests for consent withdrawn between a tier change and its notification.

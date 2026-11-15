@@ -18,7 +18,63 @@ function sendError(res: Response, status: number, error: ErrorDetails) {
   res.status(status).json({ error, correlationId: (res.locals.correlationId as string | undefined) ?? null });
 }
 
-export function createApp(profiles: ProfileStore, faults: FaultInjector, publisher: ProfileEventPublisher) {
+export interface EventResult {
+  status: number;
+  body: unknown;
+}
+
+/** Delivery records of the Kafka consumer, when the service runs on Kafka. */
+export interface DeliveryLookup {
+  delivery(messageId: string): unknown;
+  lag(): Promise<number[]>;
+  committedOffsets(): Record<string, string>;
+  readonly ready: boolean;
+}
+
+/**
+ * Handles one incoming event, however it arrived: pushed over HTTP by the
+ * in-memory broker, or read from Kafka. The answer uses HTTP semantics in
+ * both cases: 2xx = ack, 400 = never retry, 503 = retry.
+ */
+export function eventHandler(profiles: ProfileStore, faults: FaultInjector, publisher: ProfileEventPublisher) {
+  return (raw: string, meta: { messageId: string | null; correlationId: string | null }): EventResult => {
+    const error = (status: number, details: ErrorDetails): EventResult => ({
+      status,
+      body: { error: details, correlationId: meta.correlationId },
+    });
+    let event;
+    try {
+      event = parseEvent(raw);
+    } catch (err) {
+      if (!(err instanceof InvalidEventError)) throw err;
+      console.warn(`[cdp] rejected message ${meta.messageId ?? '-'}: ${err.message}`);
+      return error(400, { code: err.code, message: 'Event rejected', details: err.problems });
+    }
+
+    const fault = faults.take(event.customerId);
+    if (fault === 'fail-before-apply') {
+      return error(503, { code: 'INJECTED_FAULT', message: 'Simulated failure before apply' });
+    }
+    const { result, tierChange } = profiles.apply(event);
+    // Queued together with the profile write, before the response: a lost
+    // ack below cannot lose the downstream event (see BrokerRelay).
+    if (tierChange && event.type === 'tier.changed') {
+      publisher.publish(profileTierChanged(event, tierChange.marketingConsent));
+    }
+    if (fault === 'fail-after-apply') {
+      return error(503, { code: 'INJECTED_FAULT', message: 'Simulated failure after apply (ack lost)' });
+    }
+    return { status: 200, body: { eventId: event.eventId, result } };
+  };
+}
+
+export function createApp(
+  profiles: ProfileStore,
+  faults: FaultInjector,
+  publisher: ProfileEventPublisher,
+  consumer?: DeliveryLookup,
+) {
+  const handle = eventHandler(profiles, faults, publisher);
   const app = express();
   app.disable('x-powered-by');
 
@@ -32,35 +88,31 @@ export function createApp(profiles: ProfileStore, faults: FaultInjector, publish
   });
 
   app.get('/health', (_req, res) => {
+    // On Kafka, not ready until the consumer group is joined.
+    if (consumer && !consumer.ready) return sendError(res, 503, { code: 'NOT_READY', message: 'Consumer not ready' });
     res.json({ status: 'ok', service: 'customer-data-platform' });
   });
 
-  // Push endpoint for the broker. 2xx = ack, 400 = never retry, 503 = retry.
+  // Push endpoint for the in-memory broker, and for tests that bypass any broker.
   app.post('/events', express.text({ type: '*/*', limit: '64kb' }), (req, res) => {
     const raw = typeof req.body === 'string' ? req.body : '';
-    let event;
-    try {
-      event = parseEvent(raw);
-    } catch (err) {
-      if (!(err instanceof InvalidEventError)) throw err;
-      console.warn(`[cdp] rejected message ${req.header('X-Message-Id') ?? '-'}: ${err.message}`);
-      return sendError(res, 400, { code: err.code, message: 'Event rejected', details: err.problems });
-    }
+    const { status, body } = handle(raw, {
+      messageId: req.header('X-Message-Id') ?? null,
+      correlationId: (res.locals.correlationId as string | undefined) ?? null,
+    });
+    res.status(status).json(body);
+  });
 
-    const fault = faults.take(event.customerId);
-    if (fault === 'fail-before-apply') {
-      return sendError(res, 503, { code: 'INJECTED_FAULT', message: 'Simulated failure before apply' });
-    }
-    const { result, tierChange } = profiles.apply(event);
-    // Queued together with the profile write, before the response: a lost
-    // ack below cannot lose the downstream event (see BrokerRelay).
-    if (tierChange && event.type === 'tier.changed') {
-      publisher.publish(profileTierChanged(event, tierChange.marketingConsent));
-    }
-    if (fault === 'fail-after-apply') {
-      return sendError(res, 503, { code: 'INJECTED_FAULT', message: 'Simulated failure after apply (ack lost)' });
-    }
-    res.json({ eventId: event.eventId, result });
+  // Kafka only: what the consumer did with each record, for the broker's inspection API.
+  app.get('/internal/deliveries/:messageId', (req, res) => {
+    const delivery = consumer?.delivery(req.params.messageId as string);
+    if (!delivery) return sendError(res, 404, { code: 'NOT_FOUND', message: 'No delivery recorded' });
+    res.json(delivery);
+  });
+
+  app.get('/internal/consumer', async (_req, res) => {
+    if (!consumer) return sendError(res, 404, { code: 'NOT_FOUND', message: 'Not running on Kafka' });
+    res.json({ ready: consumer.ready, lag: await consumer.lag(), committedOffsets: consumer.committedOffsets() });
   });
 
   app.get('/profiles/:profileId', (req, res) => {

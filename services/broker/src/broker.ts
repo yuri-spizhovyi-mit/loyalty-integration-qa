@@ -60,12 +60,39 @@ export interface Message {
   customerId: string | null;
   correlationId: string | null;
   publishedAt: string;
+  /** Kafka only: where the record was written. Null on the in-memory broker. */
+  partition: number | null;
+  offset: string | null;
   deliveries: Delivery[];
+}
+
+export type DeadLetter = Message & {
+  delivery: Delivery;
+  /** Kafka only: the record on the dead-letter topic. */
+  deadLetterRecord?: unknown;
+};
+
+/**
+ * What the HTTP API needs from a broker. Two implementations: `Broker`
+ * (in memory, pushes over HTTP) and `KafkaBroker` (Kafka underneath; this
+ * service then only produces and inspects). Tests see the same API for both.
+ */
+export interface MessageBroker {
+  readonly backend: 'memory' | 'kafka';
+  readonly ready: boolean;
+  hasTopic(topic: string): boolean;
+  hasQueue(queue: string): boolean;
+  publish(topic: string, payload: string, correlationId: string | null): Message | Promise<Message>;
+  getMessage(messageId: string): Message | undefined | Promise<Message | undefined>;
+  messagesOn(topic: string, customerId?: string): Message[] | Promise<Message[]>;
+  deadLetters(queue: string, filter: { customerId?: string; messageId?: string }): DeadLetter[] | Promise<DeadLetter[]>;
+  redrive(queue: string, messageId: string): Message | undefined | Promise<Message | undefined>;
+  stats(): unknown;
 }
 
 const ERROR_BODY_CHARS = 500;
 
-function customerIdOf(payload: string): string | null {
+export function customerIdOf(payload: string): string | null {
   try {
     const parsed = JSON.parse(payload) as { customerId?: unknown };
     return typeof parsed?.customerId === 'string' ? parsed.customerId : null;
@@ -74,7 +101,9 @@ function customerIdOf(payload: string): string | null {
   }
 }
 
-export class Broker {
+export class Broker implements MessageBroker {
+  readonly backend = 'memory' as const;
+  readonly ready = true;
   private readonly messages = new Map<string, Message>();
 
   constructor(
@@ -102,6 +131,8 @@ export class Broker {
       customerId: customerIdOf(payload),
       correlationId,
       publishedAt: new Date().toISOString(),
+      partition: null,
+      offset: null,
       deliveries: this.bindings
         .filter((binding) => binding.topic === topic)
         .map((binding) => ({

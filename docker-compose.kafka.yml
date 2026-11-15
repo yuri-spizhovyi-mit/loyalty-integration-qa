@@ -1,0 +1,77 @@
+# Runs the system on Kafka instead of the in-memory broker:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.kafka.yml up --build --detach --wait
+#   BUS=kafka LOYALTY_URL=http://localhost:3001 npx playwright test
+#
+# The engine and the CDP produce to Kafka, the CDP and the notification
+# service consume from it, and the broker service turns into the tests'
+# inspection API over Kafka (same HTTP endpoints as the in-memory broker).
+#
+# Kafka is also reachable from the host on localhost:9094, so the services
+# can run outside Docker against it (KAFKA_BROKERS=localhost:9094).
+
+x-kafka-client: &kafka-client
+  KAFKA_BROKERS: kafka:9092
+
+services:
+  kafka:
+    image: apache/kafka:4.1.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Topics are created explicitly by kafka-init, with known partition counts.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    ports: ["9094:9094"]
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 3s
+      timeout: 10s
+      retries: 30
+      start_period: 10s
+
+  # One-shot: create the topics, then exit. Three partitions per topic so
+  # ordering and head-of-line blocking per partition can be tested.
+  kafka-init:
+    image: apache/kafka:4.1.0
+    depends_on:
+      kafka: { condition: service_healthy }
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        for topic in loyalty.events profile.events cdp.loyalty-events.dlt notifications.profile-events.dlt; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
+            --topic "$$topic" --partitions 3 --replication-factor 1
+        done
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --describe
+    restart: "no"
+
+  loyalty-engine:
+    environment: *kafka-client
+    depends_on:
+      kafka-init: { condition: service_completed_successfully }
+
+  customer-data-platform:
+    environment: *kafka-client
+    depends_on:
+      kafka-init: { condition: service_completed_successfully }
+
+  notification-service:
+    environment: *kafka-client
+    depends_on:
+      kafka-init: { condition: service_completed_successfully }
+
+  broker:
+    environment: *kafka-client
+    depends_on:
+      kafka-init: { condition: service_completed_successfully }

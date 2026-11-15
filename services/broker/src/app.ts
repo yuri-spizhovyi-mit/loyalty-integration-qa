@@ -1,57 +1,63 @@
 import express, { type NextFunction, type Request, type Response } from 'express';
-import type { Broker } from './broker.js';
+import type { MessageBroker } from './broker.js';
 
 function error(res: Response, status: number, code: string, message: string) {
   res.status(status).json({ error: { code, message } });
 }
 
-export function createApp(broker: Broker) {
+export function createApp(broker: MessageBroker) {
   const app = express();
   app.disable('x-powered-by');
   // Payloads are stored as raw text so tests can publish malformed JSON.
   app.use(express.text({ type: '*/*', limit: '64kb' }));
 
   app.get('/health', (_req, res) => {
-    res.json({ status: 'ok', service: 'broker' });
+    if (!broker.ready) return error(res, 503, 'NOT_READY', 'Broker backend not ready');
+    res.json({ status: 'ok', service: 'broker', backend: broker.backend });
   });
 
-  app.post('/topics/:topic/messages', (req, res) => {
+  app.post('/topics/:topic/messages', async (req, res) => {
     const topic = req.params.topic as string;
     if (!broker.hasTopic(topic)) return error(res, 404, 'TOPIC_NOT_FOUND', `No queue is bound to topic ${topic}`);
     const payload = typeof req.body === 'string' ? req.body : '';
     if (payload.length === 0) return error(res, 400, 'EMPTY_MESSAGE', 'Message body is empty');
-    const message = broker.publish(topic, payload, req.header('X-Correlation-ID') ?? null);
-    res.status(202).json({ messageId: message.messageId, queues: message.deliveries.map((d) => d.queue) });
+    const message = await broker.publish(topic, payload, req.header('X-Correlation-ID') ?? null);
+    res.status(202).json({
+      messageId: message.messageId,
+      queues: message.deliveries.map((d) => d.queue),
+      partition: message.partition,
+      offset: message.offset,
+    });
   });
 
-  app.get('/topics/:topic/messages', (req, res) => {
+  app.get('/topics/:topic/messages', async (req, res) => {
     const topic = req.params.topic as string;
     if (!broker.hasTopic(topic)) return error(res, 404, 'TOPIC_NOT_FOUND', `No queue is bound to topic ${topic}`);
     const customerId = typeof req.query.customerId === 'string' ? req.query.customerId : undefined;
-    res.json({ topic, messages: broker.messagesOn(topic, customerId) });
+    res.json({ topic, messages: await broker.messagesOn(topic, customerId) });
   });
 
-  app.get('/messages/:messageId', (req, res) => {
-    const message = broker.getMessage(req.params.messageId as string);
+  app.get('/messages/:messageId', async (req, res) => {
+    const message = await broker.getMessage(req.params.messageId as string);
     if (!message) return error(res, 404, 'MESSAGE_NOT_FOUND', `Message ${req.params.messageId} not found`);
     res.json(message);
   });
 
-  app.get('/queues', (_req, res) => {
-    res.json({ queues: broker.stats() });
+  app.get('/queues', async (_req, res) => {
+    res.json({ queues: await broker.stats() });
   });
 
-  app.get('/queues/:queue/dead-letters', (req, res) => {
+  app.get('/queues/:queue/dead-letters', async (req, res) => {
     const queue = req.params.queue as string;
     if (!broker.hasQueue(queue)) return error(res, 404, 'QUEUE_NOT_FOUND', `Queue ${queue} not found`);
     const customerId = typeof req.query.customerId === 'string' ? req.query.customerId : undefined;
     const messageId = typeof req.query.messageId === 'string' ? req.query.messageId : undefined;
-    res.json({ queue, messages: broker.deadLetters(queue, { customerId, messageId }) });
+    res.json({ queue, messages: await broker.deadLetters(queue, { customerId, messageId }) });
   });
 
-  app.post('/queues/:queue/dead-letters/:messageId/redrive', (req, res) => {
+  app.post('/queues/:queue/dead-letters/:messageId/redrive', async (req, res) => {
     const queue = req.params.queue as string;
-    const message = broker.redrive(queue, req.params.messageId as string);
+    const message = await broker.redrive(queue, req.params.messageId as string);
     if (!message) {
       return error(res, 404, 'DEAD_LETTER_NOT_FOUND', `No dead-lettered message ${req.params.messageId} on ${queue}`);
     }

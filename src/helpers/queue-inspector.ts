@@ -29,11 +29,44 @@ export interface BrokerMessage {
   customerId: string | null;
   correlationId: string | null;
   publishedAt: string;
+  /** Kafka only (null on the in-memory broker): where the record was written. */
+  partition: number | null;
+  offset: string | null;
   deliveries: Delivery[];
+}
+
+/** Kafka only: the record on the dead-letter topic. */
+export interface DeadLetterRecord {
+  topic: string;
+  partition: number;
+  offset: string;
+  key: string | null;
+  payload: string;
+  headers: Record<string, string>;
 }
 
 export interface DeadLetter extends BrokerMessage {
   delivery: Delivery;
+  deadLetterRecord?: DeadLetterRecord;
+}
+
+export interface Placement {
+  messageId: string;
+  partition: number | null;
+  offset: string | null;
+}
+
+/** Kafka only: one consumer group as the broker API reports it. */
+export interface ConsumerGroupStats {
+  queue: string;
+  topic: string;
+  consumerGroup: string;
+  deadLetterTopic: string;
+  lag: number | null;
+  lagByPartition: number[] | null;
+  /** Next offset to read, per partition, as committed by the group. */
+  committedOffsets: Record<string, string> | null;
+  deadLetters: number;
 }
 
 /**
@@ -46,6 +79,11 @@ export class QueueInspector {
 
   /** Publishes an event object, or a raw string exactly as given. Returns the broker's messageId. */
   async publish(message: unknown, topic = LOYALTY_TOPIC): Promise<string> {
+    return (await this.publishWithPlacement(message, topic)).messageId;
+  }
+
+  /** Like publish, plus the partition and offset the record got (Kafka only). */
+  async publishWithPlacement(message: unknown, topic = LOYALTY_TOPIC): Promise<Placement> {
     const body = typeof message === 'string' ? message : JSON.stringify(message);
     const response = await this.request.post(`/topics/${topic}/messages`, {
       // A Buffer so malformed payloads are sent byte for byte (Playwright
@@ -56,7 +94,14 @@ export class QueueInspector {
     if (response.status() !== 202) {
       throw new Error(`broker refused message on ${topic}: ${response.status()} ${await response.text()}`);
     }
-    return ((await response.json()) as { messageId: string }).messageId;
+    return (await response.json()) as Placement;
+  }
+
+  /** Kafka only: consumer group lag and committed offsets per queue. */
+  async consumerGroups(): Promise<ConsumerGroupStats[]> {
+    const response = await this.request.get('/queues');
+    if (response.status() !== 200) throw new Error(`queues: ${response.status()}`);
+    return ((await response.json()) as { queues: ConsumerGroupStats[] }).queues;
   }
 
   /** Publishes several messages one after the other, in the given order. */

@@ -17,7 +17,49 @@ function sendError(res: Response, status: number, error: ErrorDetails) {
   res.status(status).json({ error, correlationId: (res.locals.correlationId as string | undefined) ?? null });
 }
 
-export function createApp(store: NotificationStore, faults: FaultInjector) {
+export interface EventResult {
+  status: number;
+  body: unknown;
+}
+
+/** Delivery records of the Kafka consumer, when the service runs on Kafka. */
+export interface DeliveryLookup {
+  delivery(messageId: string): unknown;
+  lag(): Promise<number[]>;
+  committedOffsets(): Record<string, string>;
+  readonly ready: boolean;
+}
+
+/** Handles one profile event, pushed over HTTP or read from Kafka. HTTP semantics either way. */
+export function eventHandler(store: NotificationStore, faults: FaultInjector) {
+  return (raw: string, meta: { messageId: string | null; correlationId: string | null }): EventResult => {
+    const error = (status: number, details: ErrorDetails): EventResult => ({
+      status,
+      body: { error: details, correlationId: meta.correlationId },
+    });
+    let event;
+    try {
+      event = parseEvent(raw);
+    } catch (err) {
+      if (!(err instanceof InvalidEventError)) throw err;
+      console.warn(`[notifications] rejected message ${meta.messageId ?? '-'}: ${err.message}`);
+      return error(400, { code: err.code, message: 'Event rejected', details: err.problems });
+    }
+
+    const fault = faults.take(event.customerId);
+    if (fault === 'fail-before-apply') {
+      return error(503, { code: 'INJECTED_FAULT', message: 'Simulated failure before recording' });
+    }
+    const decision = store.handle(event);
+    if (fault === 'fail-after-apply') {
+      return error(503, { code: 'INJECTED_FAULT', message: 'Simulated failure after recording (ack lost)' });
+    }
+    return { status: 200, body: decision };
+  };
+}
+
+export function createApp(store: NotificationStore, faults: FaultInjector, consumer?: DeliveryLookup) {
+  const handle = eventHandler(store, faults);
   const app = express();
   app.disable('x-powered-by');
 
@@ -31,30 +73,31 @@ export function createApp(store: NotificationStore, faults: FaultInjector) {
   });
 
   app.get('/health', (_req, res) => {
+    // On Kafka, not ready until the consumer group is joined.
+    if (consumer && !consumer.ready) return sendError(res, 503, { code: 'NOT_READY', message: 'Consumer not ready' });
     res.json({ status: 'ok', service: 'notification-service' });
   });
 
-  // Push endpoint for the broker. 2xx = ack, 400 = never retry, 503 = retry.
+  // Push endpoint for the in-memory broker, and for tests that bypass any broker.
   app.post('/events', express.text({ type: '*/*', limit: '64kb' }), (req, res) => {
     const raw = typeof req.body === 'string' ? req.body : '';
-    let event;
-    try {
-      event = parseEvent(raw);
-    } catch (err) {
-      if (!(err instanceof InvalidEventError)) throw err;
-      console.warn(`[notifications] rejected message ${req.header('X-Message-Id') ?? '-'}: ${err.message}`);
-      return sendError(res, 400, { code: err.code, message: 'Event rejected', details: err.problems });
-    }
+    const { status, body } = handle(raw, {
+      messageId: req.header('X-Message-Id') ?? null,
+      correlationId: (res.locals.correlationId as string | undefined) ?? null,
+    });
+    res.status(status).json(body);
+  });
 
-    const fault = faults.take(event.customerId);
-    if (fault === 'fail-before-apply') {
-      return sendError(res, 503, { code: 'INJECTED_FAULT', message: 'Simulated failure before recording' });
-    }
-    const decision = store.handle(event);
-    if (fault === 'fail-after-apply') {
-      return sendError(res, 503, { code: 'INJECTED_FAULT', message: 'Simulated failure after recording (ack lost)' });
-    }
-    res.json(decision);
+  // Kafka only: what the consumer did with each record, for the broker's inspection API.
+  app.get('/internal/deliveries/:messageId', (req, res) => {
+    const delivery = consumer?.delivery(req.params.messageId as string);
+    if (!delivery) return sendError(res, 404, { code: 'NOT_FOUND', message: 'No delivery recorded' });
+    res.json(delivery);
+  });
+
+  app.get('/internal/consumer', async (_req, res) => {
+    if (!consumer) return sendError(res, 404, { code: 'NOT_FOUND', message: 'Not running on Kafka' });
+    res.json({ ready: consumer.ready, lag: await consumer.lag(), committedOffsets: consumer.committedOffsets() });
   });
 
   app.get('/customers/:customerId/notifications', (req, res) => {

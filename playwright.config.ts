@@ -5,6 +5,11 @@ const isCI = Boolean(process.env.CI);
 // When LOYALTY_URL is set the stack is already running (Docker Compose, a
 // shared environment); otherwise Playwright starts the mock services itself.
 const startServices = !process.env.LOYALTY_URL;
+if (config.bus === 'kafka' && startServices) {
+  throw new Error(
+    'BUS=kafka needs the Kafka stack running: start it with docker-compose.kafka.yml and set LOYALTY_URL (see the README).',
+  );
+}
 
 const service = (name: string, url: string, env: Record<string, string> = {}) => ({
   command: `npm run start:${name}`,
@@ -37,6 +42,21 @@ export default defineConfig({
     { name: 'events', testDir: 'tests/events', dependencies: ['contract'] },
     { name: 'integrity', testDir: 'tests/integrity', dependencies: ['contract'] },
     { name: 'notifications', testDir: 'tests/notifications', dependencies: ['contract'] },
+    // Kafka-specific behaviour (partitions, offsets, DLT records). Only on
+    // Kafka, and last and one test at a time: a retried record blocks its
+    // whole partition, so another test's injected fault on a shared partition
+    // would distort the timing these tests measure.
+    ...(config.bus === 'kafka'
+      ? [
+          {
+            name: 'kafka',
+            testDir: 'tests/kafka',
+            fullyParallel: false,
+            workers: 1,
+            dependencies: ['api', 'events', 'integrity', 'notifications'],
+          },
+        ]
+      : []),
   ],
   // Start order does not matter: the relays in the engine and the customer
   // data platform retry until the broker is up, and the broker retries until

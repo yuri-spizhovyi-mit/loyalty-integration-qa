@@ -35,11 +35,24 @@ jobs:
       - run: npm run typecheck
 
   test:
-    name: API and event tests (Docker Compose stack)
+    name: Tests on ${{ matrix.bus }} (Docker Compose stack)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The in-memory broker: the reference behaviour.
+          - bus: memory
+            compose_file: docker-compose.yml
+          # The same suite on Kafka, plus the Kafka-only project.
+          - bus: kafka
+            compose_file: docker-compose.yml:docker-compose.kafka.yml
     env:
       CI: 'true'
+      BUS: ${{ matrix.bus }}
+      # docker compose reads the file list from here (":"-separated on Linux).
+      COMPOSE_FILE: ${{ matrix.compose_file }}
       # Setting LOYALTY_URL tells Playwright the stack is already running, so
       # it does not start the services itself. The tests run against the
       # containers, the same way they would against a shared test environment.
@@ -59,11 +72,25 @@ jobs:
       - run: npm ci
 
       - name: Start the system under test
-        run: docker compose up --build --detach --wait --wait-timeout 120
+        run: docker compose up --build --detach --wait --wait-timeout 180
 
       # API tests need no browser, so there is no `playwright install` step.
       - name: Run tests
-        run: npx playwright test --repeat-each "$REPEAT_EACH"
+        run: |
+          if [ "$BUS" = kafka ] && [ "$REPEAT_EACH" != 1 ]; then
+            # Playwright does not repeat projects that another project depends
+            # on, and the kafka project depends on all the others (it must run
+            # alone). So repeated runs go in two parts.
+            status=0
+            npx playwright test --project=contract --project=api --project=events \
+              --project=integrity --project=notifications --repeat-each "$REPEAT_EACH" || status=$?
+            PLAYWRIGHT_HTML_OUTPUT_DIR=playwright-report/kafka-project \
+              npx playwright test --project=kafka --no-deps --repeat-each "$REPEAT_EACH" \
+              --output test-results/kafka-project || status=$?
+            exit $status
+          else
+            npx playwright test --repeat-each "$REPEAT_EACH"
+          fi
 
       - name: Service logs
         if: failure()
@@ -73,7 +100,7 @@ jobs:
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
         with:
-          name: playwright-report-${{ github.run_number }}-${{ github.run_attempt }}
+          name: playwright-report-${{ matrix.bus }}-${{ github.run_number }}-${{ github.run_attempt }}
           path: playwright-report/
           retention-days: 14
 
@@ -81,7 +108,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: test-results-${{ github.run_number }}-${{ github.run_attempt }}
+          name: test-results-${{ matrix.bus }}-${{ github.run_number }}-${{ github.run_attempt }}
           path: |
             test-results/
             service-logs.txt
