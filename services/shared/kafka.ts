@@ -240,6 +240,8 @@ export class ConsumerRunner {
   private joined = false;
   private consuming = false;
   private closing = false;
+  private stream: { destroy(error?: Error): void } | null = null;
+  private restarts = 0;
 
   constructor(private readonly options: ConsumerRunnerOptions) {
     this.consumer = this.createConsumer();
@@ -286,6 +288,18 @@ export class ConsumerRunner {
 
   get retryMode(): RetryMode {
     return this.options.retryMode;
+  }
+
+  /** How many times the supervisor has restarted a failed or closed stream. */
+  get streamRestarts(): number {
+    return this.restarts;
+  }
+
+  /** Test only: break the current stream, as a client library giving up would. */
+  failStream(): boolean {
+    if (!this.stream) return false;
+    this.stream.destroy(new Error('injected stream failure'));
+    return true;
   }
 
   /** Main-topic partitions this instance owns since the last rebalance. */
@@ -337,6 +351,7 @@ export class ConsumerRunner {
       const consumer = this.consumer;
       try {
         const stream = await consumer.consume({ topics: this.topics, mode: 'committed', fallbackMode: 'earliest' });
+        this.stream = stream;
         this.consuming = true;
         await new Promise<void>((resolve) => {
           stream.on('data', (message) => this.enqueue(message));
@@ -349,10 +364,12 @@ export class ConsumerRunner {
       } catch (error) {
         console.error(`[${this.options.service}] cannot start consumer yet: ${String(error)}`);
       }
+      this.stream = null;
       this.consuming = false;
       this.joined = false;
       this.assigned = [];
       if (this.closing) return;
+      this.restarts += 1;
       await consumer.close(true).catch(() => undefined);
       await sleep(1000);
       this.consumer = this.createConsumer();

@@ -29,6 +29,8 @@ export interface DeliveryLookup {
   committedOffsets(): Record<string, string>;
   readonly retryMode: string;
   readonly assignedPartitions: number[];
+  readonly streamRestarts: number;
+  failStream(): boolean;
   readonly ready: boolean;
 }
 
@@ -97,12 +99,19 @@ export function createApp(store: NotificationStore, faults: FaultInjector, consu
     res.json(delivery);
   });
 
+  // Kafka only, test only: break the consumer's stream; the supervisor must restart it.
+  app.post('/internal/consumer/stream-failure', (_req, res) => {
+    if (!consumer?.failStream()) return sendError(res, 409, { code: 'NOT_FOUND', message: 'No running consumer stream' });
+    res.status(202).json({ injected: true });
+  });
+
   app.get('/internal/consumer', async (_req, res) => {
     if (!consumer) return sendError(res, 404, { code: 'NOT_FOUND', message: 'Not running on Kafka' });
     res.json({
       ready: consumer.ready,
       retryMode: consumer.retryMode,
       assignedPartitions: consumer.assignedPartitions,
+      streamRestarts: consumer.streamRestarts,
       lag: await consumer.lag(),
       committedOffsets: consumer.committedOffsets(),
     });

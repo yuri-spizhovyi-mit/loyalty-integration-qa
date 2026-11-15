@@ -46,7 +46,15 @@ async function waitForFullSync(loyalty: LoyaltyClient, cdp: CdpClient, customerI
 interface ConsumerInfo {
   ready: boolean;
   assignedPartitions: number[];
+  streamRestarts: number;
 }
+
+/**
+ * How long Kafka stays down in the outage test: longer than the consumers'
+ * 10 s session timeout, so their group memberships expire and must be
+ * rebuilt. This is the scenario's length, not a wait for something to happen.
+ */
+const OUTAGE_MS = 15_000;
 
 async function consumerInfo(baseUrl: string): Promise<ConsumerInfo | null> {
   try {
@@ -102,15 +110,9 @@ test.describe('Chaos: Kafka goes away', () => {
     await waitForFullSync(loyalty, cdp, customerId);
 
     const relay = async () => readJson<RelayStatus>(await loyalty.getRelayStatus());
-    const cdpHealth = async () => {
-      try {
-        return (await fetch(`${config.cdpUrl}/health`, { signal: AbortSignal.timeout(1000) })).status;
-      } catch {
-        return 0;
-      }
-    };
 
     compose('stop', 'kafka');
+    const stoppedAt = Date.now();
     try {
       // The engine's ledger does not depend on Kafka; its relay keeps the events and retries.
       for (const points of [300, 400, 500]) {
@@ -121,9 +123,8 @@ test.describe('Chaos: Kafka goes away', () => {
       await expect
         .poll(async () => (await relay()).pending, { ...RECOVERY_POLL, message: 'relay holds the events while Kafka is down' })
         .toBeGreaterThanOrEqual(3);
-      // Keep Kafka down until the CDP's consumer stream has given up (readiness
-      // drops). Before the fix, a consumer in this state never read again.
-      await expect.poll(cdpHealth, { ...RECOVERY_POLL, message: 'CDP consumer stream failed during the outage' }).not.toBe(200);
+      const rest = OUTAGE_MS - (Date.now() - stoppedAt);
+      if (rest > 0) await new Promise((resolve) => setTimeout(resolve, rest));
     } finally {
       compose('start', 'kafka');
     }
@@ -138,6 +139,26 @@ test.describe('Chaos: Kafka goes away', () => {
   });
 });
 
+test.describe('Chaos: a consumer stream breaks', () => {
+  test('the supervisor restarts a broken stream, and the consumer keeps reading', async ({ queues, cdp, eventStream }) => {
+    // A client library can give up and close the stream (it did after a long
+    // outage). Without a supervisor the consumer stays in its group, owns no
+    // partitions and reads nothing, while looking healthy.
+    const before = (await consumerInfo(config.cdpUrl))!.streamRestarts;
+    const response = await fetch(`${config.cdpUrl}/internal/consumer/stream-failure`, { method: 'POST' });
+    expect(response.status).toBe(202);
+
+    await expect
+      .poll(async () => (await consumerInfo(config.cdpUrl))?.streamRestarts ?? before, { ...RECOVERY_POLL, message: 'stream restarted' })
+      .toBeGreaterThan(before);
+    await waitHealthy(config.cdpUrl);
+
+    // And it really reads again: a new event reaches the profile.
+    await deliverInOrder(queues, [eventStream.customerCreated(true)]);
+    expect((await cdp.profileOrNull(eventStream.customerId))?.attributes.loyalty_tier).toBe('bronze');
+  });
+});
+
 test.describe('Chaos: the consumer group grows and shrinks', () => {
   test('a second CDP instance takes over partitions and gives them back; nothing is lost or applied twice', async ({
     loyalty,
@@ -148,7 +169,8 @@ test.describe('Chaos: the consumer group grows and shrinks', () => {
     const earnForAll = (points: number) =>
       Promise.all(customers.map(({ customerId }) => loyalty.earn(customerId, anEarn().points(points).build())));
 
-    compose('--profile', 'scale', 'up', '--detach', '--wait', 'customer-data-platform-2');
+    // --no-deps: Kafka and the topics already exist; do not re-run kafka-init.
+    compose('--profile', 'scale', 'up', '--detach', '--wait', '--no-deps', 'customer-data-platform-2');
     try {
       // Both instances own part of the topic: 3 partitions over 2 members.
       const split = async () => {
