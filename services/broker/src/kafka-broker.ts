@@ -205,7 +205,12 @@ export class KafkaBroker implements MessageBroker {
   async stats() {
     return Promise.all(
       this.bindings.map(async ({ queue, topic, consumerUrl }) => {
-        const consumer = await getJson<{ ready: boolean; lag: number[]; committedOffsets: Record<string, string> }>(
+        const consumer = await getJson<{
+          ready: boolean;
+          retryMode: string;
+          lag: number[];
+          committedOffsets: Record<string, string>;
+        }>(
           `${consumerUrl}/internal/consumer`,
         );
         return {
@@ -213,6 +218,7 @@ export class KafkaBroker implements MessageBroker {
           topic,
           consumerGroup: queue,
           deadLetterTopic: dltTopic(queue),
+          retryMode: consumer?.retryMode ?? null,
           lagByPartition: consumer?.lag ?? null,
           lag: consumer ? consumer.lag.reduce((sum, value) => sum + value, 0) : null,
           committedOffsets: consumer?.committedOffsets ?? null,

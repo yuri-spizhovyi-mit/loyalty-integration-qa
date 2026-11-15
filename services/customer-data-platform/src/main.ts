@@ -1,4 +1,4 @@
-import { ConsumerRunner, KAFKA_TOPICS, KafkaRelay, kafkaBrokers } from '../../shared/kafka.js';
+import { ConsumerRunner, KAFKA_TOPICS, retryModeFromEnv, KafkaRelay, kafkaBrokers } from '../../shared/kafka.js';
 import { createApp, eventHandler } from './app.js';
 import { FaultInjector } from './faults.js';
 import { ProfileStore } from './profiles.js';
@@ -27,6 +27,7 @@ const consumer = kafka
       handler: eventHandler(profiles, faults, publisher),
       maxAttempts: Number(process.env.BROKER_MAX_ATTEMPTS ?? 4),
       retryBaseMs: Number(process.env.BROKER_RETRY_BASE_MS ?? 100),
+      retryMode: retryModeFromEnv(),
     })
   : undefined;
 

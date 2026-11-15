@@ -146,6 +146,21 @@ export interface HandlerResult {
 
 export type MessageHandler = (raw: string, meta: { messageId: string; correlationId: string | null }) => Promise<HandlerResult> | HandlerResult;
 
+/**
+ * How a failing record is retried.
+ * - blocking: in place; the partition waits (keeps per-key order).
+ * - topics: moved to `<group>.retry-N` with a delay, so the partition keeps
+ *   moving; a later record of the same key can overtake it.
+ */
+export type RetryMode = 'blocking' | 'topics';
+
+export function retryModeFromEnv(): RetryMode {
+  return process.env.KAFKA_RETRY_MODE === 'topics' ? 'topics' : 'blocking';
+}
+
+/** Retry topic for the Nth retry (after attempt N failed). */
+export const retryTopic = (group: string, n: number) => `${group}.retry-${n}`;
+
 export interface ConsumerRunnerOptions {
   service: string;
   brokers: string[];
@@ -154,28 +169,42 @@ export interface ConsumerRunnerOptions {
   handler: MessageHandler;
   maxAttempts: number;
   retryBaseMs: number;
+  retryMode: RetryMode;
+}
+
+/** Where a record was first read from; kept through retry topics so the DLT can point at it. */
+interface Origin {
+  topic: string;
+  partition: number;
+  offset: string;
 }
 
 /**
  * Consumes one topic as one consumer group, with the same rules as the
- * in-memory broker: retries with exponential backoff, then the dead-letter
- * topic; a permanent rejection goes there at once.
+ * in-memory broker: retries with exponential backoff (100, 200, 400 ms by
+ * default), then the dead-letter topic; a permanent rejection goes there at
+ * once. Two retry modes (see RetryMode):
  *
- * Retries are blocking: a partition does not move on until its current
- * record is acknowledged or dead-lettered. That keeps per-customer order
- * (a later event never overtakes a retried one), at the price of
- * head-of-line blocking for the other customers on that partition. Records
- * on other partitions are unaffected. The tests in tests/kafka pin this down.
+ * - blocking: a partition does not move on until its current record is
+ *   acknowledged or dead-lettered. Per-customer order is kept, at the price
+ *   of head-of-line blocking for the other customers on that partition.
+ * - topics: a failing record is produced to `<group>.retry-N` and the
+ *   source offset is committed, so the partition keeps moving. Each retry
+ *   topic has one fixed delay, so records on it become due in the order they
+ *   arrive; the consumer waits until a record is due. A later event of the
+ *   same customer can overtake a retried one, which the consumer must
+ *   tolerate (the CDP does, with sequence versioning).
  *
- * Offsets are committed only after a record is fully handled (acked or
- * written to the DLT), so a crash in between means redelivery, not loss.
+ * In both modes an offset is committed only after the record is handled:
+ * acked, dead-lettered, or safely parked on a retry topic. A crash in
+ * between means redelivery, not loss.
  */
 export class ConsumerRunner {
   private readonly consumer: Consumer<string, string, string, string>;
-  private readonly dltProducer: Producer<string, string, string, string>;
+  private readonly producer: Producer<string, string, string, string>;
   private readonly deliveries = new Map<string, Delivery>();
-  private readonly chains = new Map<number, Promise<void>>();
-  /** Last committed offset (next to read) per partition, after the commit succeeded. */
+  private readonly chains = new Map<string, Promise<void>>();
+  /** Committed offset (next to read) per main-topic partition, after the commit succeeded. */
   private readonly committed = new Map<number, bigint>();
   private joined = false;
 
@@ -190,8 +219,8 @@ export class ConsumerRunner {
       heartbeatInterval: 1_000,
       maxWaitTime: 100,
     });
-    this.dltProducer = new Producer({
-      clientId: `${options.service}-dlt`,
+    this.producer = new Producer({
+      clientId: `${options.service}-retry-dlt`,
       bootstrapBrokers: options.brokers,
       serializers: stringSerializers,
       idempotent: true,
@@ -200,7 +229,9 @@ export class ConsumerRunner {
     });
     this.consumer.on('consumer:group:join', () => {
       this.joined = true;
-      console.log(`[${options.service}] joined consumer group ${options.group} on ${options.topic}`);
+      console.log(
+        `[${options.service}] joined consumer group ${options.group} on ${this.topics.join(', ')} (retries: ${options.retryMode})`,
+      );
     });
   }
 
@@ -209,31 +240,40 @@ export class ConsumerRunner {
     return this.joined;
   }
 
+  get retryMode(): RetryMode {
+    return this.options.retryMode;
+  }
+
+  private get retryTopics(): string[] {
+    if (this.options.retryMode !== 'topics') return [];
+    return Array.from({ length: this.options.maxAttempts - 1 }, (_, i) => retryTopic(this.options.group, i + 1));
+  }
+
+  private get topics(): string[] {
+    return [this.options.topic, ...this.retryTopics];
+  }
+
   delivery(messageId: string): Delivery | undefined {
     const delivery = this.deliveries.get(messageId);
     return delivery ? structuredClone(delivery) : undefined;
   }
 
-  /** Records not yet consumed by this group, per partition. */
+  /** Records on the main topic not yet committed by this group, per partition. */
   async lag(): Promise<number[]> {
     const lag = await this.consumer.getLag({ topics: [this.options.topic] });
     return (lag.get(this.options.topic) ?? []).map((value) => Number(value < 0n ? 0n : value));
   }
 
-  /** Committed offset per partition (the next offset the group will read), as strings. */
+  /** Committed offset per main-topic partition (the next offset the group will read), as strings. */
   committedOffsets(): Record<string, string> {
     return Object.fromEntries([...this.committed].map(([partition, offset]) => [String(partition), String(offset)]));
   }
 
   async start(): Promise<void> {
-    // Keep trying until Kafka is reachable and the topic exists.
+    // Keep trying until Kafka is reachable and the topics exist.
     for (;;) {
       try {
-        const stream = await this.consumer.consume({
-          topics: [this.options.topic],
-          mode: 'committed',
-          fallbackMode: 'earliest',
-        });
+        const stream = await this.consumer.consume({ topics: this.topics, mode: 'committed', fallbackMode: 'earliest' });
         stream.on('data', (message) => this.enqueue(message));
         stream.on('error', (error) => console.error(`[${this.options.service}] consumer error: ${String(error)}`));
         return;
@@ -246,47 +286,65 @@ export class ConsumerRunner {
 
   async close(): Promise<void> {
     await this.consumer.close(true);
-    await this.dltProducer.close();
+    await this.producer.close();
   }
 
-  /** One promise chain per partition: in order within a partition, in parallel across partitions. */
+  /** One promise chain per topic partition: in order within it, in parallel across them. */
   private enqueue(message: KafkaMessage<string, string, string, string>): void {
-    const previous = this.chains.get(message.partition) ?? Promise.resolve();
+    const lane = `${message.topic}:${message.partition}`;
+    const previous = this.chains.get(lane) ?? Promise.resolve();
     const next = previous
       .then(() => this.process(message))
       .catch((error) => console.error(`[${this.options.service}] processing failed: ${String(error)}`));
-    this.chains.set(message.partition, next);
+    this.chains.set(lane, next);
   }
 
   private async process(message: KafkaMessage<string, string, string, string>): Promise<void> {
-    const { group, handler, maxAttempts, retryBaseMs } = this.options;
-    const messageId = message.headers.get('message-id') ?? `${message.topic}-${message.partition}-${message.offset}`;
-    const correlationId = message.headers.get('correlation-id') ?? null;
-    const raw = message.value ?? '';
+    const { group, maxAttempts, retryBaseMs, retryMode } = this.options;
+    const headers = message.headers;
+    const messageId = headers.get('message-id') ?? `${message.topic}-${message.partition}-${message.offset}`;
+    const fromRetryTopic = message.topic !== this.options.topic;
+    const origin: Origin = fromRetryTopic
+      ? {
+          topic: headers.get('origin-topic') ?? this.options.topic,
+          partition: Number(headers.get('origin-partition') ?? -1),
+          offset: headers.get('origin-offset') ?? '-1',
+        }
+      : { topic: message.topic, partition: message.partition, offset: String(message.offset) };
 
-    // A redriven record keeps its message-id: start a fresh attempt budget but keep the history.
+    // A record from the main topic starts an attempt budget: either new, or a
+    // redrive (same message-id), which keeps the history. A record from a
+    // retry topic continues the budget it carries.
     const existing = this.deliveries.get(messageId);
-    const delivery: Delivery = existing
-      ? Object.assign(existing, { status: 'pending', attempts: 0, deadLetterReason: null, deadLetteredAt: null })
-      : {
-          queue: group,
-          status: 'pending',
-          attempts: 0,
-          deadLetterReason: null,
-          lastError: null,
-          deliveredAt: null,
-          deadLetteredAt: null,
-          history: [],
-          partition: message.partition,
-          offset: String(message.offset),
-        };
-    delivery.partition = message.partition;
-    delivery.offset = String(message.offset);
+    const delivery: Delivery =
+      existing ??
+      ({
+        queue: group,
+        status: 'pending',
+        attempts: 0,
+        deadLetterReason: null,
+        lastError: null,
+        deliveredAt: null,
+        deadLetteredAt: null,
+        history: [],
+        partition: origin.partition,
+        offset: origin.offset,
+      } satisfies Delivery);
+    if (!fromRetryTopic) {
+      Object.assign(delivery, { status: 'pending', attempts: 0, deadLetterReason: null, deadLetteredAt: null });
+    } else {
+      delivery.attempts = Number(headers.get('retry-attempt') ?? delivery.attempts + 1) - 1;
+      // Wait until the record is due. Records on one retry topic share one delay, so they are due in order.
+      const wait = Number(headers.get('retry-due') ?? 0) - Date.now();
+      if (wait > 0) await sleep(wait);
+    }
+    delivery.partition = origin.partition;
+    delivery.offset = origin.offset;
     this.deliveries.set(messageId, delivery);
 
     while (delivery.status === 'pending') {
       delivery.attempts += 1;
-      const attempt = await this.attempt(handler, raw, messageId, correlationId, delivery.attempts);
+      const attempt = await this.attempt(message.value ?? '', messageId, headers.get('correlation-id') ?? null, delivery.attempts);
       delivery.history.push(attempt);
       delivery.lastError = attempt.error;
 
@@ -294,28 +352,35 @@ export class ConsumerRunner {
         delivery.status = 'delivered';
         delivery.deliveredAt = attempt.at;
       } else if (attempt.outcome === 'reject') {
-        await this.deadLetter(message, messageId, delivery, 'rejected');
+        await this.deadLetter(message, messageId, origin, delivery, 'rejected');
       } else if (delivery.attempts >= maxAttempts) {
-        await this.deadLetter(message, messageId, delivery, 'max-attempts-exceeded');
+        await this.deadLetter(message, messageId, origin, delivery, 'max-attempts-exceeded');
+      } else if (retryMode === 'topics') {
+        // Park it and let the partition move on.
+        const n = delivery.attempts;
+        await this.produce(retryTopic(group, n), message, {
+          'message-id': messageId,
+          'correlation-id': headers.get('correlation-id') ?? '',
+          'retry-attempt': String(n + 1),
+          'retry-due': String(Date.now() + retryBaseMs * 2 ** (n - 1)),
+          'origin-topic': origin.topic,
+          'origin-partition': String(origin.partition),
+          'origin-offset': origin.offset,
+        });
+        break;
       } else {
         await sleep(retryBaseMs * 2 ** (delivery.attempts - 1));
       }
     }
-    // Commit only now: the record is acked or safely in the DLT.
+    // Commit only now: the record is acked, in the DLT, or parked on a retry topic.
     await message.commit();
-    this.committed.set(message.partition, message.offset + 1n);
+    if (!fromRetryTopic) this.committed.set(message.partition, message.offset + 1n);
   }
 
-  private async attempt(
-    handler: MessageHandler,
-    raw: string,
-    messageId: string,
-    correlationId: string | null,
-    attempt: number,
-  ): Promise<Attempt> {
+  private async attempt(raw: string, messageId: string, correlationId: string | null, attempt: number): Promise<Attempt> {
     const at = new Date().toISOString();
     try {
-      const { status, body } = await handler(raw, { messageId, correlationId });
+      const { status, body } = await this.options.handler(raw, { messageId, correlationId });
       if (status >= 200 && status < 300) return { attempt, at, status, outcome: 'ack', error: null };
       const error = `status ${status}: ${JSON.stringify(body).slice(0, 500)}`;
       const permanent = status >= 400 && status < 500 && status !== 408 && status !== 429;
@@ -328,40 +393,43 @@ export class ConsumerRunner {
   private async deadLetter(
     message: KafkaMessage<string, string, string, string>,
     messageId: string,
+    origin: Origin,
     delivery: Delivery,
     reason: DeadLetterReason,
   ): Promise<void> {
-    // The DLT record keeps the original key and bytes, plus why and where it failed.
-    for (;;) {
-      try {
-        await this.dltProducer.send({
-          messages: [
-            {
-              topic: dltTopic(this.options.group),
-              key: message.key ?? undefined,
-              value: message.value ?? '',
-              headers: {
-                'message-id': messageId,
-                'correlation-id': message.headers.get('correlation-id') ?? '',
-                'dlt-reason': reason,
-                'dlt-attempts': String(delivery.attempts),
-                'dlt-error': (delivery.lastError ?? '').slice(0, 500),
-                'dlt-source-topic': message.topic,
-                'dlt-source-partition': String(message.partition),
-                'dlt-source-offset': String(message.offset),
-              },
-            },
-          ],
-        });
-        break;
-      } catch (error) {
-        console.error(`[${this.options.service}] DLT produce failed, retrying: ${String(error)}`);
-        await sleep(200);
-      }
-    }
+    // The DLT record keeps the original key and bytes, plus why it failed and where it came from.
+    await this.produce(dltTopic(this.options.group), message, {
+      'message-id': messageId,
+      'correlation-id': message.headers.get('correlation-id') ?? '',
+      'dlt-reason': reason,
+      'dlt-attempts': String(delivery.attempts),
+      'dlt-error': (delivery.lastError ?? '').slice(0, 500),
+      'dlt-source-topic': origin.topic,
+      'dlt-source-partition': String(origin.partition),
+      'dlt-source-offset': origin.offset,
+    });
     delivery.status = 'dead-lettered';
     delivery.deadLetterReason = reason;
     delivery.deadLetteredAt = new Date().toISOString();
     console.warn(`[${this.options.service}] dead-lettered ${messageId} (${reason}): ${delivery.lastError}`);
+  }
+
+  /** Produces a copy of the record (same key and bytes) with the given headers, retrying until Kafka accepts it. */
+  private async produce(
+    topic: string,
+    message: KafkaMessage<string, string, string, string>,
+    headers: Record<string, string>,
+  ): Promise<void> {
+    for (;;) {
+      try {
+        await this.producer.send({
+          messages: [{ topic, key: message.key ?? undefined, value: message.value ?? '', headers }],
+        });
+        return;
+      } catch (error) {
+        console.error(`[${this.options.service}] produce to ${topic} failed, retrying: ${String(error)}`);
+        await sleep(200);
+      }
+    }
   }
 }

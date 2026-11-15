@@ -62,6 +62,8 @@ export interface ConsumerGroupStats {
   topic: string;
   consumerGroup: string;
   deadLetterTopic: string;
+  /** How the consumer retries: in place, or through retry topics. */
+  retryMode: 'blocking' | 'topics' | null;
   lag: number | null;
   lagByPartition: number[] | null;
   /** Next offset to read, per partition, as committed by the group. */

@@ -24,8 +24,8 @@ The specs in [`specs/`](../specs) describe each service's API or events and are 
 | Event reliability | Duplicates, out-of-order delivery, lost acknowledgements, retries with backoff, dead-letter queues and redrive |
 | Data integrity | Ledger reconciliation (sum of entries = balance), engine ↔ outbox ↔ profile reconciliation, field mapping per row |
 | Notifications | Exactly one per tier change, none without consent, none for failed transactions |
-| Kafka | Partitioning by key, order within a partition, head-of-line blocking during retries, offsets committed only after handling, dead-letter topic records |
-| Delivery pipeline | The same suite runs in GitHub Actions against Docker Compose on both buses (in-memory and Kafka): on every push to `main`, every pull request and nightly |
+| Kafka | Partitioning by key, order within a partition, two retry modes (blocking in place, and retry topics), offsets committed only after handling, dead-letter topic records |
+| Delivery pipeline | The same suite runs in GitHub Actions against Docker Compose in three configurations (in-memory broker, Kafka with blocking retries, Kafka with retry topics): on every push to `main`, every pull request and nightly |
 
 ### Out of scope
 
@@ -70,8 +70,8 @@ The suite has six Playwright projects. `contract` runs first, and the others dep
 | events | `tests/events` | 29 | Profile sync end to end; duplicates; ordering; retries and dead-letter queue |
 | integrity | `tests/integrity` | 35 | Ledger reconciliation, cross-system reconciliation, field mapping per row, self-test of the checker |
 | notifications | `tests/notifications` | 20 | Notification triggers end to end, and exactly-once behaviour under faults |
-| kafka | `tests/kafka` | 7 | Kafka only: keys and partitions, head-of-line blocking, commit-after-handling, consumer lag, dead-letter topic records |
-| **Total** | | **320 + 7** | 320 on the in-memory broker; 327 on Kafka, where the first 320 run unchanged |
+| kafka | `tests/kafka` | 5 + 3 | Kafka only. 5 in both retry modes: the running mode, keys and partitions, dead-letter records. 3 for the running mode: head-of-line blocking, commit timing and lag (blocking), or no blocking, parking and reordering (retry topics) |
+| **Total** | | **320 + 8** | 320 on the in-memory broker; 328 on Kafka in either retry mode, where the first 320 run unchanged |
 
 ### Test design techniques
 
@@ -82,7 +82,7 @@ The suite has six Playwright projects. `contract` runs first, and the others dep
 - **Fault injection.** Test-only endpoints make the CDP or the notification service fail for one customer, either before processing (an outage) or after it (a lost acknowledgement). This drives the retry, duplicate and DLQ paths on purpose instead of waiting for them to happen.
 - **Seeded random runs.** Ledger reconciliation runs random mixes of earns, redeems, refunds and retries with fixed seeds, so a failure can be replayed exactly. The seed is in the test title, and the operation log is attached to the report.
 - **Independent oracles.** Expected tiers and ledger rules are written in the test code from the business rules (`src/helpers/reconciliation.ts`), never imported from the services.
-- **Mutation testing (manual).** Bugs were injected into the services one at a time to show the tests catch them. Examples: no deduplication, last-arrival-wins, consent ignored, unknown consent treated as consent, publishing after the acknowledgement, a wrong `balanceAfter`, tier not lower-cased. Four more were Kafka-specific: committing before handling, losing per-partition order, a random key instead of the customer ID, and a dead-letter record without its source placement. All 18 were caught. This is not automated yet (§9).
+- **Mutation testing (manual).** Bugs were injected into the services one at a time to show the tests catch them. Examples: no deduplication, last-arrival-wins, consent ignored, unknown consent treated as consent, publishing after the acknowledgement, a wrong `balanceAfter`, tier not lower-cased. Four more were Kafka-specific: committing before handling, losing per-partition order, a random key instead of the customer ID, and a dead-letter record without its source placement. Three more were for retry topics: retrying in place anyway, no delay on the retry topics, and a dead-letter record that points at the retry topic instead of the original. All 21 were caught. This is not automated yet (§9).
 
 ### Framework structure
 
@@ -96,7 +96,7 @@ The suite has six Playwright projects. `contract` runs first, and the others dep
 - **Two ways to run the stack.**
   - With `LOYALTY_URL` unset, Playwright starts the four services itself, on the in-memory broker. This is the fast local loop.
   - With `LOYALTY_URL` set, it uses a stack that is already running. This is how CI uses Docker Compose, and how the suite would run against a shared test environment.
-- **Two message buses.** `docker-compose.yml` runs on the in-memory broker. Adding `docker-compose.kafka.yml` runs a single-node Kafka (KRaft) and a one-shot job that creates the topics: `loyalty.events`, `profile.events` and a dead-letter topic per consumer group, each with 3 partitions. On Kafka the services produce and consume directly, and the broker service becomes the tests' inspection API over Kafka, with the same HTTP endpoints. The tests run with `BUS=kafka` to add the Kafka project.
+- **Two message buses.** `docker-compose.yml` runs on the in-memory broker. Adding `docker-compose.kafka.yml` runs a single-node Kafka (KRaft) and a one-shot job that creates the topics: `loyalty.events`, `profile.events`, and for each consumer group a dead-letter topic and three retry topics, each with 3 partitions. `KAFKA_RETRY_MODE` (`blocking` or `topics`) chooses how the consumers retry (§7.11). On Kafka the services produce and consume directly, and the broker service becomes the tests' inspection API over Kafka, with the same HTTP endpoints. The tests run with `BUS=kafka` to add the Kafka project.
 - **Isolation by data, not by environment.** Every test creates its own customer with a unique ID (`qa-<time>-<random>`), so tests run fully in parallel against shared services and need no cleanup. Consumer tests that publish to the broker directly use synthetic `evt-` customers that exist only in the event stream.
 - **Traceability.** Every test sends its own `X-Correlation-ID`. It flows through the engine, the events, the broker and the notification. On failure, the correlation ID and customer IDs are printed and attached to the report, so the run can be found in the service logs.
 - **Test-only endpoints** are kept apart from the public API: `/internal/outbox` (published events) and `/internal/faults` (fault injection), marked as test-only in the specs. They are contract-tested like every other endpoint, and so are the notification decisions. The broker is test infrastructure with no spec, so its inspection endpoints are not contract-checked.
@@ -112,7 +112,7 @@ The suite has six Playwright projects. `contract` runs first, and the others dep
 
 ### Exit criteria (a change may be merged or released)
 
-1. All tests pass on the pull request and on `main`, on both buses, with **zero retries** (§7.3).
+1. All tests pass on the pull request and on `main`, in all three configurations, with **zero retries** (§7.3).
 2. No test is skipped, except by the coverage guards on purpose. CI uses `forbidOnly`, so a stray `test.only` fails the run.
 3. The nightly run, which repeats every test 3 times, has been green since the change was merged. A failure there is treated as a defect (a flaky test or a race in the system), not ignored.
 4. Every new endpoint, response status, event type or field mapping has its row in a spec, and the coverage tests prove it is exercised. They fail when a documented response or a mapping row has no test.
@@ -236,13 +236,16 @@ A downgrade sends a `tier-downgrade` notification. The README only requires upgr
 
 The random ledger runs use three fixed seeds instead of a new random seed each time. A fixed seed always replays the same run, so a failure can be reproduced; a new seed each run explores more histories but can fail without a way to replay it. Adding a nightly job with a random seed, printed in the report, would combine both.
 
-### 7.11 Blocking retries, and the noisy-neighbour effect
+### 7.11 Blocking retries or retry topics, and the noisy-neighbour effect
 
-The Kafka consumers retry a failing record in place, so its partition waits until the record is acknowledged or dead-lettered. That keeps each customer's events in order, because a later event can never overtake a retried one. The cost is head-of-line blocking: every other customer on the same partition waits too.
+The Kafka consumers have two retry modes, chosen with `KAFKA_RETRY_MODE`:
 
-The alternative is retry topics: move the failing record to a `retry-1`, `retry-2` … topic and keep the partition moving. That removes the blocking but gives up per-customer order, so the consumer has to cope with it. The CDP can, thanks to sequence versioning (§7.7), so this is a real option. The blocking design was kept because it is simpler and easier to reason about.
+- **Blocking (the default).** A failing record is retried in place, so its partition waits until the record is acknowledged or dead-lettered. Each customer's events stay in order, because a later event can never overtake a retried one. The cost is head-of-line blocking: every other customer on the same partition waits too.
+- **Retry topics.** A failing record is moved to `<group>.retry-1`, then `retry-2`, `retry-3` (100, 200, 400 ms) and finally the dead-letter topic. The source offset is committed as soon as the record is parked, so the partition keeps moving. Each retry topic has one fixed delay, so its records become due in the order they arrive, and the consumer waits only on that retry partition. The cost is order: a customer's later event can overtake a retried one, so the consumer must cope with reordering. The CDP can, through sequence versioning (§7.7). A test shows sequence 3 applied before sequence 2, and the profile still ending with the right balance.
 
-The tests ran into this effect themselves. The head-of-line test failed 2 times in 6 when parallel copies of it, or other tests with injected faults, blocked the "other" partition too; with 3 partitions, a few parallel faults cover them all. Run alone, it passed every time. So the `kafka` project runs after all the others, with one worker. A side effect: Playwright does not repeat projects that another project depends on, so the nightly Kafka run is split into two runs to repeat everything.
+Blocking stays the default because it is simpler to reason about and needs no extra topics. Retry topics are the better choice when one slow customer must not delay the others, as long as every consumer tolerates reordering. CI runs the whole suite in both modes, plus the tests specific to the running mode. The 320 general tests pass unchanged in both.
+
+The tests ran into the blocking mode's cost themselves. The head-of-line test failed 2 times in 6 when parallel copies of it, or other tests with injected faults, blocked the "other" partition too; with 3 partitions, a few parallel faults cover them all. Run alone, it passed every time. So the `kafka` project runs after all the others, with one worker. A side effect: Playwright does not repeat projects that another project depends on, so the nightly Kafka run is split into two runs to repeat everything.
 
 ## 8. Reporting and defect handling
 
@@ -252,7 +255,6 @@ The tests ran into this effect themselves. The head-of-line test failed 2 times 
 
 ## 9. Known gaps and next steps
 
-- **Non-blocking retries on Kafka** (retry topics), with tests showing the partition keeps moving while order is restored by sequence versioning (§7.11).
 - **Kafka failure modes beyond one node**: broker restart, consumer group rebalancing with several instances, and a schema registry for message contracts.
 - **Automated mutation testing** (for example Stryker) on the services, in place of the manual runs described in §3.
 - **Consumer-driven contracts** between the real teams, so a provider change is checked against what each consumer actually uses.

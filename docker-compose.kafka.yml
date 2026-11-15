@@ -3,6 +3,9 @@
 #   docker compose -f docker-compose.yml -f docker-compose.kafka.yml up --build --detach --wait
 #   BUS=kafka LOYALTY_URL=http://localhost:3001 npx playwright test
 #
+# Retries in place by default. For non-blocking retries through retry topics,
+# set KAFKA_RETRY_MODE=topics for both commands (Compose and the tests).
+#
 # The engine and the CDP produce to Kafka, the CDP and the notification
 # service consume from it, and the broker service turns into the tests'
 # inspection API over Kafka (same HTTP endpoints as the in-memory broker).
@@ -12,6 +15,8 @@
 
 x-kafka-client: &kafka-client
   KAFKA_BROKERS: kafka:9092
+  # blocking (default): retry in place. topics: <group>.retry-1..3, then the DLT.
+  KAFKA_RETRY_MODE: ${KAFKA_RETRY_MODE:-blocking}
 
 services:
   kafka:
@@ -40,7 +45,9 @@ services:
       start_period: 10s
 
   # One-shot: create the topics, then exit. Three partitions per topic so
-  # ordering and head-of-line blocking per partition can be tested.
+  # ordering and head-of-line blocking per partition can be tested. The
+  # retry topics are created in both modes; only KAFKA_RETRY_MODE=topics uses
+  # them. Their count is BROKER_MAX_ATTEMPTS - 1 (4 attempts -> 3 topics).
   kafka-init:
     image: apache/kafka:4.1.0
     depends_on:
@@ -49,7 +56,11 @@ services:
     command:
       - |
         set -e
-        for topic in loyalty.events profile.events cdp.loyalty-events.dlt notifications.profile-events.dlt; do
+        topics="loyalty.events profile.events"
+        for group in cdp.loyalty-events notifications.profile-events; do
+          topics="$$topics $$group.dlt $$group.retry-1 $$group.retry-2 $$group.retry-3"
+        done
+        for topic in $$topics; do
           /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
             --topic "$$topic" --partitions 3 --replication-factor 1
         done

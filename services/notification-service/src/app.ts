@@ -27,6 +27,7 @@ export interface DeliveryLookup {
   delivery(messageId: string): unknown;
   lag(): Promise<number[]>;
   committedOffsets(): Record<string, string>;
+  readonly retryMode: string;
   readonly ready: boolean;
 }
 
@@ -97,7 +98,12 @@ export function createApp(store: NotificationStore, faults: FaultInjector, consu
 
   app.get('/internal/consumer', async (_req, res) => {
     if (!consumer) return sendError(res, 404, { code: 'NOT_FOUND', message: 'Not running on Kafka' });
-    res.json({ ready: consumer.ready, lag: await consumer.lag(), committedOffsets: consumer.committedOffsets() });
+    res.json({
+      ready: consumer.ready,
+      retryMode: consumer.retryMode,
+      lag: await consumer.lag(),
+      committedOffsets: consumer.committedOffsets(),
+    });
   });
 
   app.get('/customers/:customerId/notifications', (req, res) => {

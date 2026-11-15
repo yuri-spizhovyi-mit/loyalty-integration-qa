@@ -10,6 +10,8 @@ export const config = {
    * runs only on Kafka; everything else runs on both.
    */
   bus: process.env.BUS === 'kafka' ? ('kafka' as const) : ('memory' as const),
+  /** On Kafka: how the consumers retry. Must match the services' KAFKA_RETRY_MODE. */
+  kafkaRetryMode: process.env.KAFKA_RETRY_MODE === 'topics' ? ('topics' as const) : ('blocking' as const),
   /** Must match the broker's BROKER_MAX_ATTEMPTS. */
   brokerMaxAttempts: Number(process.env.BROKER_MAX_ATTEMPTS ?? 4),
 } as const;

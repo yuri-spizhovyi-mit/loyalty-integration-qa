@@ -51,6 +51,8 @@ export default defineConfig({
           {
             name: 'kafka',
             testDir: 'tests/kafka',
+            // Only the tests for the retry mode the stack runs in.
+            testIgnore: config.kafkaRetryMode === 'topics' ? '**/blocking-retries.spec.ts' : '**/retry-topics.spec.ts',
             fullyParallel: false,
             workers: 1,
             dependencies: ['api', 'events', 'integrity', 'notifications'],

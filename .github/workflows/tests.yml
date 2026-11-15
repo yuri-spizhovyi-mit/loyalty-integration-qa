@@ -35,7 +35,7 @@ jobs:
       - run: npm run typecheck
 
   test:
-    name: Tests on ${{ matrix.bus }} (Docker Compose stack)
+    name: Tests on ${{ matrix.name }} (Docker Compose stack)
     runs-on: ubuntu-latest
     timeout-minutes: 25
     strategy:
@@ -43,14 +43,24 @@ jobs:
       matrix:
         include:
           # The in-memory broker: the reference behaviour.
-          - bus: memory
+          - name: memory
+            bus: memory
             compose_file: docker-compose.yml
-          # The same suite on Kafka, plus the Kafka-only project.
-          - bus: kafka
+          # The same suite on Kafka, plus the Kafka-only project. Retries in place.
+          - name: kafka
+            bus: kafka
+            retry_mode: blocking
+            compose_file: docker-compose.yml:docker-compose.kafka.yml
+          # Kafka with non-blocking retries through retry topics.
+          - name: kafka-retry-topics
+            bus: kafka
+            retry_mode: topics
             compose_file: docker-compose.yml:docker-compose.kafka.yml
     env:
       CI: 'true'
       BUS: ${{ matrix.bus }}
+      # Read by docker-compose.kafka.yml and by the tests (which Kafka tests to run).
+      KAFKA_RETRY_MODE: ${{ matrix.retry_mode || 'blocking' }}
       # docker compose reads the file list from here (":"-separated on Linux).
       COMPOSE_FILE: ${{ matrix.compose_file }}
       # Setting LOYALTY_URL tells Playwright the stack is already running, so
@@ -100,7 +110,7 @@ jobs:
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
         with:
-          name: playwright-report-${{ matrix.bus }}-${{ github.run_number }}-${{ github.run_attempt }}
+          name: playwright-report-${{ matrix.name }}-${{ github.run_number }}-${{ github.run_attempt }}
           path: playwright-report/
           retention-days: 14
 
@@ -108,7 +118,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: test-results-${{ matrix.bus }}-${{ github.run_number }}-${{ github.run_attempt }}
+          name: test-results-${{ matrix.name }}-${{ github.run_number }}-${{ github.run_attempt }}
           path: |
             test-results/
             service-logs.txt
