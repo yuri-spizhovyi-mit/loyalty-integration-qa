@@ -23,7 +23,11 @@ export default defineConfig({
   // No retries: a test that passes on retry is a flaky test, and it should be
   // reported and fixed, not hidden.
   retries: 0,
-  reporter: [['list'], ['html', { open: 'never' }]],
+  // In CI: annotations on the commit (github), a JUnit file for tools that
+  // read one, and the HTML report that the workflow uploads as an artifact.
+  reporter: isCI
+    ? [['github'], ['list'], ['html', { open: 'never' }], ['junit', { outputFile: 'test-results/junit.xml' }]]
+    : [['list'], ['html', { open: 'never' }]],
   // Contract checks run first. If the specs, the validator or a response
   // shape is broken, the behaviour tests would fail for the wrong reason, so
   // they are skipped and the contract failure is reported on its own.

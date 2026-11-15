@@ -1,0 +1,69 @@
+# The whole system under test: loyalty engine -> broker -> customer data
+# platform -> broker -> notification service.
+#
+#   docker compose up -d --wait
+#   npx playwright test        # reuses the running stack locally
+#
+# Ports match the defaults in src/config.ts, so the tests need no settings.
+
+x-service: &service
+  build: .
+  image: loyalty-integration-qa/mock-service:local
+  restart: unless-stopped
+  init: true
+
+x-health: &health
+  interval: 2s
+  timeout: 2s
+  retries: 15
+  start_period: 5s
+
+services:
+  loyalty-engine:
+    <<: *service
+    environment:
+      SERVICE: loyalty-engine
+      PORT: "3001"
+      BROKER_URL: http://broker:3004
+      LOYALTY_PROCESSING_DELAY_MS: "50"
+    ports: ["3001:3001"]
+    healthcheck:
+      <<: *health
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3001/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+
+  customer-data-platform:
+    <<: *service
+    environment:
+      SERVICE: customer-data-platform
+      PORT: "3002"
+      BROKER_URL: http://broker:3004
+    ports: ["3002:3002"]
+    healthcheck:
+      <<: *health
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3002/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+
+  notification-service:
+    <<: *service
+    environment:
+      SERVICE: notification-service
+      PORT: "3003"
+    ports: ["3003:3003"]
+    healthcheck:
+      <<: *health
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3003/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+
+  broker:
+    <<: *service
+    environment:
+      SERVICE: broker
+      PORT: "3004"
+      CDP_URL: http://customer-data-platform:3002
+      NOTIFICATION_URL: http://notification-service:3003
+      # The tests read the same value (BROKER_MAX_ATTEMPTS, default 4).
+      BROKER_MAX_ATTEMPTS: "4"
+      BROKER_RETRY_BASE_MS: "100"
+      BROKER_DELIVERY_TIMEOUT_MS: "2000"
+    ports: ["3004:3004"]
+    healthcheck:
+      <<: *health
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3004/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]

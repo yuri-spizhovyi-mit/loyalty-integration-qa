@@ -1,0 +1,92 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Nightly at 07:00 UTC (23:00 in Vancouver during standard time).
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+    inputs:
+      repeat_each:
+        description: Run every test this many times (flakiness check)
+        default: '1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+
+jobs:
+  static:
+    name: Typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+
+  test:
+    name: API and event tests (Docker Compose stack)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CI: 'true'
+      # Setting LOYALTY_URL tells Playwright the stack is already running, so
+      # it does not start the services itself. The tests run against the
+      # containers, the same way they would against a shared test environment.
+      LOYALTY_URL: http://localhost:3001
+      CDP_URL: http://localhost:3002
+      NOTIFICATION_URL: http://localhost:3003
+      BROKER_URL: http://localhost:3004
+      BROKER_MAX_ATTEMPTS: '4'
+      # The nightly run repeats every test to catch flaky ones; pushes run once.
+      REPEAT_EACH: ${{ github.event_name == 'schedule' && '3' || inputs.repeat_each || '1' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+
+      - name: Start the system under test
+        run: docker compose up --build --detach --wait --wait-timeout 120
+
+      # API tests need no browser, so there is no `playwright install` step.
+      - name: Run tests
+        run: npx playwright test --repeat-each "$REPEAT_EACH"
+
+      - name: Service logs
+        if: failure()
+        run: docker compose logs --no-color --timestamps > service-logs.txt
+
+      - name: Upload HTML report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ github.run_number }}-${{ github.run_attempt }}
+          path: playwright-report/
+          retention-days: 14
+
+      - name: Upload test results and service logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ github.run_number }}-${{ github.run_attempt }}
+          path: |
+            test-results/
+            service-logs.txt
+          retention-days: 14
+
+      - name: Stop the stack
+        if: always()
+        run: docker compose down --volumes
