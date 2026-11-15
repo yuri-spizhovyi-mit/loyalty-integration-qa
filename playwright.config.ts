@@ -14,7 +14,13 @@ export default defineConfig({
   // reported and fixed, not hidden.
   retries: 0,
   reporter: [['list'], ['html', { open: 'never' }]],
-  projects: [{ name: 'api', testDir: 'tests/api' }],
+  // Contract checks run first. If the specs, the validator or a response
+  // shape is broken, the behaviour tests would fail for the wrong reason, so
+  // they are skipped and the contract failure is reported on its own.
+  projects: [
+    { name: 'contract', testDir: 'tests/contract' },
+    { name: 'api', testDir: 'tests/api', dependencies: ['contract'] },
+  ],
   webServer: startServices
     ? [
         {

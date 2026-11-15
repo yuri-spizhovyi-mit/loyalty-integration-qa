@@ -7,6 +7,7 @@ import type { CreateCustomerBody, TransactionResponse } from './clients/loyalty-
 import { config } from './config.js';
 import { readJson } from './helpers/json.js';
 import { expect } from './helpers/matchers.js';
+import { getContract } from './helpers/schema-validator.js';
 
 interface Fixtures {
   /** Unique per test and sent on every request as X-Correlation-ID. */
@@ -39,8 +40,9 @@ export const test = base.extend<Fixtures>({
     await context.dispose();
   },
 
+  // Every response through this client is validated against openapi.yaml.
   loyalty: async ({ loyaltyApi }, use) => {
-    await use(new LoyaltyClient(loyaltyApi));
+    await use(new LoyaltyClient(loyaltyApi, getContract()));
   },
 
   createCustomer: async ({ loyalty }, use, testInfo) => {

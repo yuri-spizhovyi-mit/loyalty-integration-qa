@@ -1,4 +1,5 @@
 import { type APIResponse, expect as baseExpect } from '@playwright/test';
+import { getContract, type ValidationResult } from './schema-validator.js';
 
 const MAX_BODY_CHARS = 2000;
 
@@ -20,6 +21,15 @@ export async function describeResponse(response: APIResponse): Promise<string> {
 
 interface ErrorBody {
   error?: { code?: string };
+}
+
+function schemaMessage(result: ValidationResult, isNot: boolean, payload: unknown, extra = ''): string {
+  const header = isNot
+    ? `Expected payload NOT to match ${result.against}, but it does`
+    : `Payload does not match ${result.against}:`;
+  const errors = result.errors.map((error) => `  - ${error}`).join('\n');
+  const shown = JSON.stringify(payload);
+  return `${header}\n${errors}\n${extra}  payload: ${shown.length > MAX_BODY_CHARS ? `${shown.slice(0, MAX_BODY_CHARS)}...` : shown}`;
 }
 
 export const expect = baseExpect.extend({
@@ -60,6 +70,45 @@ export const expect = baseExpect.extend({
         `${this.utils.matcherHint('toBeApiError', undefined, undefined, { isNot: this.isNot })}\n\n` +
         `Expected: ${this.isNot ? 'not ' : ''}${status} ${code}\n` +
         `Received: ${actualStatus} ${actualCode ?? '(no error code)'}\n${details}`,
+    };
+  },
+
+  /** `await expect(response).toMatchContract('earnPoints')`: body vs the OpenAPI schema for its status. */
+  async toMatchContract(response: APIResponse, operationId: string) {
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch {
+      body = '(not JSON)';
+    }
+    const result = getContract().validateResponse(operationId, response.status(), body);
+    const context =
+      `  url:           ${response.url()}\n` +
+      `  correlationId: ${response.headers()['x-correlation-id'] ?? '(none)'}\n`;
+    return {
+      pass: result.valid,
+      name: 'toMatchContract',
+      message: () => schemaMessage(result, this.isNot, body, context),
+    };
+  },
+
+  /** `expect(event).toMatchEventSchema()`: the AsyncAPI message is chosen by the event's `type`. */
+  toMatchEventSchema(event: unknown) {
+    const result = getContract().validateEvent(event);
+    return {
+      pass: result.valid,
+      name: 'toMatchEventSchema',
+      message: () => schemaMessage(result, this.isNot, event),
+    };
+  },
+
+  /** `expect(body).toMatchSchema('Error')`: validates against a named OpenAPI component. */
+  toMatchSchema(payload: unknown, componentName: string) {
+    const result = getContract().validateComponent(componentName, payload);
+    return {
+      pass: result.valid,
+      name: 'toMatchSchema',
+      message: () => schemaMessage(result, this.isNot, payload),
     };
   },
 });

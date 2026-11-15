@@ -1,0 +1,170 @@
+asyncapi: 3.0.0
+info:
+  title: Loyalty engine events
+  version: 1.0.0
+  description: |
+    Events the loyalty engine publishes after each committed ledger write.
+
+    Delivery is at least once, so consumers must deduplicate by `eventId`.
+    `sequence` increases by one per customer, so a consumer can spot gaps and
+    out-of-order delivery. `points` uses the same sign as the ledger entry.
+defaultContentType: application/json
+
+channels:
+  loyaltyEvents:
+    address: loyalty.events
+    messages:
+      PointsEarned: { $ref: '#/components/messages/PointsEarned' }
+      PointsRedeemed: { $ref: '#/components/messages/PointsRedeemed' }
+      PointsRefunded: { $ref: '#/components/messages/PointsRefunded' }
+      TierChanged: { $ref: '#/components/messages/TierChanged' }
+
+operations:
+  publishLoyaltyEvents:
+    action: send
+    channel: { $ref: '#/channels/loyaltyEvents' }
+    messages:
+      - { $ref: '#/channels/loyaltyEvents/messages/PointsEarned' }
+      - { $ref: '#/channels/loyaltyEvents/messages/PointsRedeemed' }
+      - { $ref: '#/channels/loyaltyEvents/messages/PointsRefunded' }
+      - { $ref: '#/channels/loyaltyEvents/messages/TierChanged' }
+
+components:
+  messages:
+    PointsEarned:
+      name: points.earned
+      summary: Points were added by an EARN entry.
+      payload: { $ref: '#/components/schemas/PointsEarned' }
+    PointsRedeemed:
+      name: points.redeemed
+      summary: Points were spent by a REDEEM entry.
+      payload: { $ref: '#/components/schemas/PointsRedeemed' }
+    PointsRefunded:
+      name: points.refunded
+      summary: An earn was fully or partly reversed by a REFUND entry.
+      payload: { $ref: '#/components/schemas/PointsRefunded' }
+    TierChanged:
+      name: tier.changed
+      summary: The customer moved to a different tier. Published after the transaction event.
+      payload: { $ref: '#/components/schemas/TierChanged' }
+
+  schemas:
+    CustomerId:
+      type: string
+      pattern: '^[A-Za-z0-9_-]{3,64}$'
+    TransactionId:
+      type: string
+      pattern: '^txn_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    Tier:
+      type: string
+      enum: [Bronze, Silver, Gold]
+    Timestamp:
+      type: string
+      format: date-time
+      pattern: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$'
+
+    # Fields every event has. Each message lists all envelope fields under
+    # `properties` again so `additionalProperties: false` applies to them.
+    EventEnvelope:
+      type: object
+      required: [eventId, type, sequence, customerId, correlationId, occurredAt, data]
+      properties:
+        eventId: { type: string, format: uuid }
+        type: { enum: [points.earned, points.redeemed, points.refunded, tier.changed] }
+        sequence: { type: integer, minimum: 1 }
+        customerId: { $ref: '#/components/schemas/CustomerId' }
+        correlationId: { type: string, minLength: 1, maxLength: 128 }
+        occurredAt: { $ref: '#/components/schemas/Timestamp' }
+        data: { type: object }
+
+    TransactionData:
+      type: object
+      required: [transactionId, entryType, points, balanceAfter, reference, refundOf]
+      additionalProperties: false
+      properties:
+        transactionId: { $ref: '#/components/schemas/TransactionId' }
+        entryType: { enum: [EARN, REDEEM, REFUND] }
+        points: { type: integer, minimum: -1000000, maximum: 1000000 }
+        balanceAfter: { type: integer, minimum: 0 }
+        reference:
+          oneOf:
+            - { type: string, minLength: 1, maxLength: 128 }
+            - { type: 'null' }
+        refundOf:
+          oneOf:
+            - { $ref: '#/components/schemas/TransactionId' }
+            - { type: 'null' }
+
+    PointsEarned:
+      allOf: [{ $ref: '#/components/schemas/EventEnvelope' }]
+      additionalProperties: false
+      properties:
+        eventId: true
+        type: { const: points.earned }
+        sequence: true
+        customerId: true
+        correlationId: true
+        occurredAt: true
+        data:
+          allOf: [{ $ref: '#/components/schemas/TransactionData' }]
+          properties:
+            entryType: { const: EARN }
+            points: { minimum: 1 }
+            refundOf: { type: 'null' }
+
+    PointsRedeemed:
+      allOf: [{ $ref: '#/components/schemas/EventEnvelope' }]
+      additionalProperties: false
+      properties:
+        eventId: true
+        type: { const: points.redeemed }
+        sequence: true
+        customerId: true
+        correlationId: true
+        occurredAt: true
+        data:
+          allOf: [{ $ref: '#/components/schemas/TransactionData' }]
+          properties:
+            entryType: { const: REDEEM }
+            points: { maximum: -1 }
+            refundOf: { type: 'null' }
+
+    PointsRefunded:
+      allOf: [{ $ref: '#/components/schemas/EventEnvelope' }]
+      additionalProperties: false
+      properties:
+        eventId: true
+        type: { const: points.refunded }
+        sequence: true
+        customerId: true
+        correlationId: true
+        occurredAt: true
+        data:
+          allOf: [{ $ref: '#/components/schemas/TransactionData' }]
+          properties:
+            entryType: { const: REFUND }
+            points: { maximum: -1 }
+            refundOf: { $ref: '#/components/schemas/TransactionId' }
+
+    TierChanged:
+      allOf: [{ $ref: '#/components/schemas/EventEnvelope' }]
+      additionalProperties: false
+      properties:
+        eventId: true
+        type: { const: tier.changed }
+        sequence: true
+        customerId: true
+        correlationId: true
+        occurredAt: true
+        data:
+          type: object
+          required: [previousTier, newTier, direction, qualifyingPoints, transactionId]
+          additionalProperties: false
+          properties:
+            previousTier: { $ref: '#/components/schemas/Tier' }
+            newTier: { $ref: '#/components/schemas/Tier' }
+            direction: { enum: [upgrade, downgrade] }
+            qualifyingPoints: { type: integer, minimum: 0 }
+            transactionId: { $ref: '#/components/schemas/TransactionId' }
+          # previousTier != newTier cannot be expressed in JSON Schema;
+          # the contract tests check it.

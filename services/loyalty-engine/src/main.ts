@@ -9,8 +9,9 @@ const port = Number(process.env.PORT ?? 3001);
 // against a broken implementation just because the requests did not overlap.
 const processingDelayMs = Number(process.env.LOYALTY_PROCESSING_DELAY_MS ?? 50);
 
-const service = new LoyaltyService(new LoyaltyStore(), new InMemoryEventLog(), { processingDelayMs });
-const server = createApp(service).listen(port, () => {
+const outbox = new InMemoryEventLog();
+const service = new LoyaltyService(new LoyaltyStore(), outbox, { processingDelayMs });
+const server = createApp(service, outbox).listen(port, () => {
   console.log(`[loyalty-engine] listening on http://localhost:${port} (processing delay ${processingDelayMs} ms)`);
 });
 

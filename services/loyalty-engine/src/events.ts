@@ -21,10 +21,14 @@ export interface EventPublisher {
   publish(event: LoyaltyEvent): void;
 }
 
+/** Every published event, kept so tests can inspect them through /internal/outbox. */
 export class InMemoryEventLog implements EventPublisher {
   readonly events: LoyaltyEvent[] = [];
   publish(event: LoyaltyEvent): void {
     this.events.push(event);
+  }
+  forCustomer(customerId: string): LoyaltyEvent[] {
+    return this.events.filter((event) => event.customerId === customerId);
   }
 }
 

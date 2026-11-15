@@ -131,21 +131,23 @@ test.describe('Protocol behaviour', () => {
   });
 
   test('malformed JSON is rejected with 400 MALFORMED_JSON', async ({ loyalty }) => {
-    const response = await loyalty.postRaw('/customers', '{"customerId": "qa-broken",');
+    const response = await loyalty.postRaw('createCustomer', '/customers', '{"customerId": "qa-broken",');
 
     await expect(response).toBeApiError(400, 'MALFORMED_JSON');
   });
 
   test('a JSON array body is rejected with 400', async ({ loyalty }) => {
-    const response = await loyalty.postRaw('/customers', '[{"customerId": "qa-array"}]');
+    const response = await loyalty.postRaw('createCustomer', '/customers', '[{"customerId": "qa-array"}]');
 
     await expect(response).toBeApiError(400, 'VALIDATION_ERROR');
   });
 
   test('an unknown route returns 404 with the standard error body', async ({ loyaltyApi }) => {
+    // Not a documented operation, so the client cannot check it; check the Error schema directly.
     const response = await loyaltyApi.get('/no-such-endpoint');
 
     await expect(response).toBeApiError(404, 'NOT_FOUND');
+    expect(await readJson<unknown>(response)).toMatchSchema('Error');
   });
 
   test('responses are JSON', async ({ loyalty }) => {

@@ -49,6 +49,41 @@ export interface TransactionResponse {
   tier: Tier;
 }
 
+export type EventType = 'points.earned' | 'points.redeemed' | 'points.refunded' | 'tier.changed';
+
+/** An event as published by the engine. The exact shape per type is in asyncapi.yaml. */
+export interface LoyaltyEvent<T = Record<string, unknown>> {
+  eventId: string;
+  type: EventType;
+  sequence: number;
+  customerId: string;
+  correlationId: string;
+  occurredAt: string;
+  data: T;
+}
+
+export interface TransactionEventData {
+  transactionId: string;
+  entryType: EntryType;
+  points: number;
+  balanceAfter: number;
+  reference: string | null;
+  refundOf: string | null;
+}
+
+export interface TierChangedData {
+  previousTier: Tier;
+  newTier: Tier;
+  direction: 'upgrade' | 'downgrade';
+  qualifyingPoints: number;
+  transactionId: string;
+}
+
+export interface OutboxResponse {
+  customerId: string;
+  events: LoyaltyEvent[];
+}
+
 export interface ErrorResponse {
   error: {
     code: string;

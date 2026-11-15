@@ -2,8 +2,15 @@ import { randomUUID } from 'node:crypto';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { canonicalJson, IdempotencyStore, type StoredResponse } from './concurrency.js';
 import { ApiError, errorBody } from './errors.js';
+import type { InMemoryEventLog } from './events.js';
 import type { LoyaltyService } from './service.js';
-import { parseCreateCustomer, parseIdempotencyKey, parsePointsRequest, parseRefundRequest } from './validation.js';
+import {
+  CUSTOMER_ID_PATTERN,
+  parseCreateCustomer,
+  parseIdempotencyKey,
+  parsePointsRequest,
+  parseRefundRequest,
+} from './validation.js';
 
 const MAX_CORRELATION_ID_LENGTH = 128;
 
@@ -11,7 +18,7 @@ function correlationIdOf(res: Response): string {
   return res.locals.correlationId as string;
 }
 
-export function createApp(service: LoyaltyService) {
+export function createApp(service: LoyaltyService, outbox: InMemoryEventLog) {
   const app = express();
   const idempotency = new IdempotencyStore();
 
@@ -90,8 +97,19 @@ export function createApp(service: LoyaltyService) {
     }));
   });
 
+  // Test inspection: the events published for one customer, in publish order.
+  app.get('/internal/outbox', (req, res) => {
+    const customerId = req.query.customerId;
+    if (typeof customerId !== 'string' || !CUSTOMER_ID_PATTERN.test(customerId)) {
+      throw new ApiError('VALIDATION_ERROR', 'customerId query parameter is required', [
+        { field: 'customerId', message: 'must be a valid customer ID' },
+      ]);
+    }
+    res.json({ customerId, events: outbox.forCustomer(customerId) });
+  });
+
   app.use((req, _res, next) => {
-    next(new ApiError('NOT_FOUND', `No route for ${req.method} ${req.path}`));
+    next(new ApiError('NOT_FOUND',`No route for ${req.method} ${req.path}`));
   });
 
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {

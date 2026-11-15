@@ -1,0 +1,429 @@
+openapi: 3.1.0
+info:
+  title: Loyalty engine API
+  version: 1.0.0
+  description: |
+    Points, tiers and an append-only ledger for a loyalty programme.
+
+    Rules the schemas encode:
+    - Points and money are integers. Timestamps are ISO 8601 in UTC (`Z`).
+    - Ledger `points` are signed: EARN is positive, REDEEM and REFUND are
+      negative, so a balance is the sum of its entries.
+    - Tiers come from qualifying points (earned minus refunded):
+      Bronze 0-999, Silver 1000-4999, Gold 5000+.
+    - Write endpoints accept an `Idempotency-Key` header.
+servers:
+  - url: http://localhost:3001
+tags:
+  - name: customers
+  - name: transactions
+  - name: internal
+    description: Inspection endpoints for tests. Not part of the public API.
+
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      tags: [internal]
+      responses:
+        '200':
+          description: Service is up
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Health' }
+
+  /customers:
+    post:
+      operationId: createCustomer
+      tags: [customers]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateCustomerRequest' }
+      responses:
+        '201':
+          description: Customer created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Customer' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /customers/{customerId}:
+    parameters:
+      - $ref: '#/components/parameters/CustomerId'
+    get:
+      operationId: getCustomer
+      tags: [customers]
+      responses:
+        '200':
+          description: The customer with balance and tier
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Customer' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /customers/{customerId}/tier:
+    parameters:
+      - $ref: '#/components/parameters/CustomerId'
+    get:
+      operationId: getTier
+      tags: [customers]
+      responses:
+        '200':
+          description: Current tier and distance to the next one
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TierStatus' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /customers/{customerId}/ledger:
+    parameters:
+      - $ref: '#/components/parameters/CustomerId'
+    get:
+      operationId: getLedger
+      tags: [customers]
+      responses:
+        '200':
+          description: Every ledger entry for the customer, oldest first
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Ledger' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /customers/{customerId}/earn:
+    parameters:
+      - $ref: '#/components/parameters/CustomerId'
+    post:
+      operationId: earnPoints
+      tags: [transactions]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PointsRequest' }
+      responses:
+        '201': { $ref: '#/components/responses/Transaction' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /customers/{customerId}/redeem:
+    parameters:
+      - $ref: '#/components/parameters/CustomerId'
+    post:
+      operationId: redeemPoints
+      tags: [transactions]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PointsRequest' }
+      responses:
+        '201': { $ref: '#/components/responses/Transaction' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/BusinessRule' }
+
+  /customers/{customerId}/refund:
+    parameters:
+      - $ref: '#/components/parameters/CustomerId'
+    post:
+      operationId: refundPoints
+      tags: [transactions]
+      description: Refunds all or part of an EARN entry. Omit `points` to refund what is left of it.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RefundRequest' }
+      responses:
+        '201': { $ref: '#/components/responses/Transaction' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/BusinessRule' }
+
+  /internal/outbox:
+    get:
+      operationId: listOutboxEvents
+      tags: [internal]
+      description: |
+        Events the engine has published for one customer, in publish order.
+        Each item is a message from `asyncapi.yaml`; its schema lives there.
+      parameters:
+        - name: customerId
+          in: query
+          required: true
+          schema: { $ref: '#/components/schemas/CustomerId' }
+      responses:
+        '200':
+          description: Published events
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OutboxEvents' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+components:
+  parameters:
+    CustomerId:
+      name: customerId
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/CustomerId' }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        Same key and same request: the first response is replayed and
+        `Idempotent-Replayed: true` is set. Same key and a different request: 409.
+      schema: { type: string, minLength: 1, maxLength: 255 }
+
+  responses:
+    Transaction:
+      description: Ledger entry written
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/TransactionResult' }
+    BadRequest:
+      description: The request failed validation or is not valid JSON
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: Customer, transaction or route not found
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflict:
+      description: Customer already exists, or Idempotency-Key reused with a different request
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    BusinessRule:
+      description: Valid request that breaks a business rule (balance, refund limits)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    CustomerId:
+      type: string
+      pattern: '^[A-Za-z0-9_-]{3,64}$'
+    TransactionId:
+      type: string
+      pattern: '^txn_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    CorrelationId:
+      type: string
+      minLength: 1
+      maxLength: 128
+    Timestamp:
+      description: ISO 8601, UTC only
+      type: string
+      format: date-time
+      pattern: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$'
+    Tier:
+      type: string
+      enum: [Bronze, Silver, Gold]
+    Points:
+      description: A positive amount of points in a request
+      type: integer
+      minimum: 1
+      maximum: 1000000
+    Balance:
+      type: integer
+      minimum: 0
+    Reference:
+      type: string
+      minLength: 1
+      maxLength: 128
+
+    Health:
+      type: object
+      required: [status, service]
+      additionalProperties: false
+      properties:
+        status: { const: ok }
+        service: { type: string }
+
+    CreateCustomerRequest:
+      type: object
+      required: [customerId]
+      additionalProperties: false
+      properties:
+        customerId: { $ref: '#/components/schemas/CustomerId' }
+        marketingConsent: { type: boolean, default: false }
+
+    PointsRequest:
+      type: object
+      required: [points]
+      additionalProperties: false
+      properties:
+        points: { $ref: '#/components/schemas/Points' }
+        reference: { $ref: '#/components/schemas/Reference' }
+
+    RefundRequest:
+      type: object
+      required: [transactionId]
+      additionalProperties: false
+      properties:
+        transactionId: { type: string, minLength: 1 }
+        points: { $ref: '#/components/schemas/Points' }
+        reference: { $ref: '#/components/schemas/Reference' }
+
+    Customer:
+      type: object
+      required: [customerId, marketingConsent, balance, qualifyingPoints, tier, createdAt]
+      additionalProperties: false
+      properties:
+        customerId: { $ref: '#/components/schemas/CustomerId' }
+        marketingConsent: { type: boolean }
+        balance: { $ref: '#/components/schemas/Balance' }
+        qualifyingPoints: { $ref: '#/components/schemas/Balance' }
+        tier: { $ref: '#/components/schemas/Tier' }
+        createdAt: { $ref: '#/components/schemas/Timestamp' }
+
+    TierStatus:
+      type: object
+      required: [customerId, tier, qualifyingPoints, nextTier, pointsToNextTier]
+      additionalProperties: false
+      properties:
+        customerId: { $ref: '#/components/schemas/CustomerId' }
+        tier: { $ref: '#/components/schemas/Tier' }
+        qualifyingPoints: { $ref: '#/components/schemas/Balance' }
+        nextTier:
+          description: null at the top tier
+          oneOf:
+            - { $ref: '#/components/schemas/Tier' }
+            - { type: 'null' }
+        pointsToNextTier:
+          description: null at the top tier
+          oneOf:
+            - { type: integer, minimum: 1 }
+            - { type: 'null' }
+      # Gold is the top tier: there is no next tier exactly when the tier is Gold.
+      if:
+        properties: { tier: { const: Gold } }
+      then:
+        properties: { nextTier: { type: 'null' }, pointsToNextTier: { type: 'null' } }
+      else:
+        properties: { nextTier: { $ref: '#/components/schemas/Tier' }, pointsToNextTier: { type: integer } }
+
+    LedgerEntry:
+      type: object
+      required: [transactionId, customerId, type, points, balanceAfter, reference, refundOf, correlationId, createdAt]
+      additionalProperties: false
+      properties:
+        transactionId: { $ref: '#/components/schemas/TransactionId' }
+        customerId: { $ref: '#/components/schemas/CustomerId' }
+        type: { enum: [EARN, REDEEM, REFUND] }
+        points:
+          description: Signed. EARN > 0; REDEEM and REFUND < 0.
+          type: integer
+          minimum: -1000000
+          maximum: 1000000
+          not: { const: 0 }
+        balanceAfter: { $ref: '#/components/schemas/Balance' }
+        reference:
+          oneOf:
+            - { $ref: '#/components/schemas/Reference' }
+            - { type: 'null' }
+        refundOf:
+          oneOf:
+            - { $ref: '#/components/schemas/TransactionId' }
+            - { type: 'null' }
+        correlationId: { $ref: '#/components/schemas/CorrelationId' }
+        createdAt: { $ref: '#/components/schemas/Timestamp' }
+      # The sign of `points` and the presence of `refundOf` follow from `type`.
+      allOf:
+        - if: { properties: { type: { const: EARN } } }
+          then: { properties: { points: { minimum: 1 }, refundOf: { type: 'null' } } }
+        - if: { properties: { type: { const: REDEEM } } }
+          then: { properties: { points: { maximum: -1 }, refundOf: { type: 'null' } } }
+        - if: { properties: { type: { const: REFUND } } }
+          then: { properties: { points: { maximum: -1 }, refundOf: { $ref: '#/components/schemas/TransactionId' } } }
+
+    Ledger:
+      type: object
+      required: [customerId, balance, entries]
+      additionalProperties: false
+      properties:
+        customerId: { $ref: '#/components/schemas/CustomerId' }
+        balance: { $ref: '#/components/schemas/Balance' }
+        entries:
+          type: array
+          items: { $ref: '#/components/schemas/LedgerEntry' }
+
+    TransactionResult:
+      type: object
+      required: [transaction, balance, qualifyingPoints, tier]
+      additionalProperties: false
+      properties:
+        transaction: { $ref: '#/components/schemas/LedgerEntry' }
+        balance: { $ref: '#/components/schemas/Balance' }
+        qualifyingPoints: { $ref: '#/components/schemas/Balance' }
+        tier: { $ref: '#/components/schemas/Tier' }
+
+    OutboxEvents:
+      type: object
+      required: [customerId, events]
+      additionalProperties: false
+      properties:
+        customerId: { $ref: '#/components/schemas/CustomerId' }
+        events:
+          type: array
+          items:
+            description: A message defined in asyncapi.yaml
+            type: object
+            required: [eventId, type]
+            properties:
+              eventId: { type: string }
+              type: { type: string }
+
+    ErrorCode:
+      type: string
+      enum:
+        - VALIDATION_ERROR
+        - MALFORMED_JSON
+        - NOT_FOUND
+        - CUSTOMER_NOT_FOUND
+        - CUSTOMER_ALREADY_EXISTS
+        - TRANSACTION_NOT_FOUND
+        - INSUFFICIENT_BALANCE
+        - REFUND_NOT_ALLOWED
+        - REFUND_EXCEEDS_ORIGINAL
+        - IDEMPOTENCY_KEY_REUSED
+        - INTERNAL_ERROR
+
+    Error:
+      type: object
+      required: [error, correlationId]
+      additionalProperties: false
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          additionalProperties: false
+          properties:
+            code: { $ref: '#/components/schemas/ErrorCode' }
+            message: { type: string, minLength: 1 }
+            details:
+              type: array
+              minItems: 1
+              items:
+                type: object
+                required: [field, message]
+                additionalProperties: false
+                properties:
+                  field: { type: string, minLength: 1 }
+                  message: { type: string, minLength: 1 }
+        correlationId: { $ref: '#/components/schemas/CorrelationId' }
