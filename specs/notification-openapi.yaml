@@ -1,0 +1,248 @@
+openapi: 3.1.0
+info:
+  title: Notification service (mock)
+  version: 1.0.0
+  description: |
+    Turns `profile.tier_changed` events (cdp-asyncapi.yaml) into customer
+    notifications. It records each notification and sends nothing. The broker
+    pushes each event to `POST /events`:
+
+    - 200: acknowledged, with the decision made for the event.
+    - 400: the event will never be accepted; dead-letter it without retrying.
+    - 503: temporary failure; retry later.
+
+    Rules:
+
+    | Situation | Decision | Notification |
+    |---|---|---|
+    | First event for a tier change, consent true | sent | one, template tier-upgrade or tier-downgrade |
+    | First event for a tier change, consent false | suppressed-no-consent | none |
+    | First event for a tier change, consent null (unknown) | suppressed-consent-unknown | none |
+    | Any later event with the same sourceEventId | duplicate | none (the first decision stands) |
+
+    Every event gets a decision, so "no notification" can be checked by
+    waiting for the decision instead of waiting a fixed time.
+
+servers:
+  - url: http://localhost:3003
+
+paths:
+  /health:
+    get:
+      operationId: getNotificationHealth
+      responses:
+        '200':
+          description: Service is up
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Health' }
+
+  /events:
+    post:
+      operationId: receiveProfileEvent
+      summary: Push endpoint for the broker
+      requestBody:
+        required: true
+        description: A message defined in cdp-asyncapi.yaml
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '200':
+          description: Acknowledged
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Decision' }
+        '400':
+          description: Malformed or invalid event; do not retry
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: Temporary failure; retry
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /customers/{customerId}/notifications:
+    get:
+      operationId: listNotifications
+      parameters:
+        - { $ref: '#/components/parameters/CustomerIdPath' }
+      responses:
+        '200':
+          description: Notifications recorded for the customer, oldest first (empty if none)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationList' }
+
+  /customers/{customerId}/decisions:
+    get:
+      operationId: listDecisions
+      parameters:
+        - { $ref: '#/components/parameters/CustomerIdPath' }
+      responses:
+        '200':
+          description: One decision per event received for the customer, oldest first
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DecisionList' }
+
+  /internal/faults/{customerId}:
+    parameters:
+      - name: customerId
+        in: path
+        required: true
+        schema: { type: string }
+    put:
+      operationId: setNotificationFault
+      summary: Test only. Fail the next deliveries for one customer.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FaultRequest' }
+      responses:
+        '204': { description: Fault set }
+        '400':
+          description: Invalid fault
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    delete:
+      operationId: clearNotificationFault
+      summary: Test only. Remove the fault for one customer.
+      responses:
+        '204': { description: Fault cleared }
+
+components:
+  parameters:
+    CustomerIdPath:
+      name: customerId
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/CustomerId' }
+
+  schemas:
+    CustomerId:
+      type: string
+      pattern: '^[A-Za-z0-9_-]{3,64}$'
+    TransactionId:
+      type: string
+      pattern: '^txn_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    Timestamp:
+      type: string
+      format: date-time
+      pattern: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$'
+    ProfileTier:
+      type: string
+      enum: [bronze, silver, gold]
+    NotificationId:
+      type: string
+      pattern: '^ntf_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+
+    Health:
+      type: object
+      required: [status, service]
+      additionalProperties: false
+      properties:
+        status: { const: ok }
+        service: { const: notification-service }
+
+    Decision:
+      type: object
+      required: [eventId, sourceEventId, outcome, notificationId, decidedAt]
+      additionalProperties: false
+      properties:
+        eventId: { type: string, format: uuid }
+        sourceEventId: { type: string, format: uuid }
+        outcome: { enum: [sent, duplicate, suppressed-no-consent, suppressed-consent-unknown] }
+        notificationId:
+          description: The notification this event produced (sent) or matched (duplicate); otherwise null.
+          oneOf:
+            - { $ref: '#/components/schemas/NotificationId' }
+            - { type: 'null' }
+        decidedAt: { $ref: '#/components/schemas/Timestamp' }
+      # A sent decision always names its notification; a suppressed one never does.
+      allOf:
+        - if: { properties: { outcome: { const: sent } } }
+          then: { properties: { notificationId: { $ref: '#/components/schemas/NotificationId' } } }
+        - if: { properties: { outcome: { enum: [suppressed-no-consent, suppressed-consent-unknown] } } }
+          then: { properties: { notificationId: { type: 'null' } } }
+
+    DecisionList:
+      type: object
+      required: [customerId, decisions]
+      additionalProperties: false
+      properties:
+        customerId: { $ref: '#/components/schemas/CustomerId' }
+        decisions:
+          type: array
+          items: { $ref: '#/components/schemas/Decision' }
+
+    Notification:
+      type: object
+      required:
+        - notificationId
+        - customerId
+        - channel
+        - template
+        - tier
+        - previousTier
+        - transactionId
+        - sourceEventId
+        - correlationId
+        - createdAt
+      additionalProperties: false
+      properties:
+        notificationId: { $ref: '#/components/schemas/NotificationId' }
+        customerId: { $ref: '#/components/schemas/CustomerId' }
+        channel: { const: email }
+        template: { enum: [tier-upgrade, tier-downgrade] }
+        tier: { $ref: '#/components/schemas/ProfileTier' }
+        previousTier: { $ref: '#/components/schemas/ProfileTier' }
+        transactionId: { $ref: '#/components/schemas/TransactionId' }
+        sourceEventId: { type: string, format: uuid }
+        correlationId: { type: string, minLength: 1, maxLength: 128 }
+        createdAt: { $ref: '#/components/schemas/Timestamp' }
+
+    NotificationList:
+      type: object
+      required: [customerId, notifications]
+      additionalProperties: false
+      properties:
+        customerId: { $ref: '#/components/schemas/CustomerId' }
+        notifications:
+          type: array
+          items: { $ref: '#/components/schemas/Notification' }
+
+    FaultRequest:
+      type: object
+      required: [mode, times]
+      additionalProperties: false
+      properties:
+        mode: { enum: [fail-before-apply, fail-after-apply] }
+        times: { type: integer, minimum: 1, maximum: 1000 }
+
+    Error:
+      type: object
+      required: [error, correlationId]
+      additionalProperties: false
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          additionalProperties: false
+          properties:
+            code:
+              enum:
+                - MALFORMED_JSON
+                - INVALID_EVENT
+                - UNKNOWN_EVENT_TYPE
+                - VALIDATION_ERROR
+                - INJECTED_FAULT
+                - NOT_FOUND
+                - INTERNAL_ERROR
+            message: { type: string }
+            details: { type: array, items: { type: string } }
+        correlationId: { type: [string, 'null'] }

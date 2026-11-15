@@ -124,6 +124,13 @@ export class Broker {
     return this.messages.get(messageId);
   }
 
+  /** Messages published on a topic, oldest first, optionally for one customer. */
+  messagesOn(topic: string, customerId?: string): Message[] {
+    return [...this.messages.values()].filter(
+      (message) => message.topic === topic && (!customerId || message.customerId === customerId),
+    );
+  }
+
   deadLetters(queue: string, filter: { customerId?: string; messageId?: string }): (Message & { delivery: Delivery })[] {
     const result: (Message & { delivery: Delivery })[] = [];
     for (const message of this.messages.values()) {

@@ -10,6 +10,11 @@ info:
     - 400: the event will never be accepted; dead-letter it without retrying.
     - 503: temporary failure; retry later.
 
+    When a tier.changed event changes the profile's tier, the platform also
+    publishes `profile.tier_changed` (see cdp-asyncapi.yaml). The event is
+    queued in the same step as the profile write, so a 503 after the write
+    cannot lose it.
+
     Field mapping from events to profile attributes:
 
     | Event | Event field | Profile attribute |

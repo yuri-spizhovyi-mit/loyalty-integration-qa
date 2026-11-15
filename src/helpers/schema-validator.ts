@@ -8,17 +8,23 @@ import { parse } from 'yaml';
  * Validates payloads against the specs in `specs/`, which are the single
  * source of truth. Nothing here hard-codes a schema: response schemas are
  * looked up from the OpenAPI documents by operationId and status code, and
- * event schemas from the AsyncAPI document by message name (= event type).
+ * event schemas from the AsyncAPI documents by message name (= event type).
  */
 
 /** The REST APIs with an OpenAPI document in specs/. */
-export type ApiName = 'loyalty' | 'cdp';
+export type ApiName = 'loyalty' | 'cdp' | 'notification';
+/** The event publishers with an AsyncAPI document in specs/. */
+export type EventSource = 'loyalty' | 'profile';
 
 const OPENAPI_FILES: Record<ApiName, { file: string; id: string }> = {
   loyalty: { file: 'openapi.yaml', id: 'https://specs.loyalty.local/openapi.json' },
   cdp: { file: 'cdp-openapi.yaml', id: 'https://specs.loyalty.local/cdp-openapi.json' },
+  notification: { file: 'notification-openapi.yaml', id: 'https://specs.loyalty.local/notification-openapi.json' },
 };
-const ASYNCAPI_ID = 'https://specs.loyalty.local/asyncapi.json';
+const ASYNCAPI_FILES: Record<EventSource, { file: string; id: string }> = {
+  loyalty: { file: 'asyncapi.yaml', id: 'https://specs.loyalty.local/asyncapi.json' },
+  profile: { file: 'cdp-asyncapi.yaml', id: 'https://specs.loyalty.local/cdp-asyncapi.json' },
+};
 const HTTP_METHODS = ['get', 'post', 'put', 'patch', 'delete'] as const;
 
 type Json = Record<string, unknown>;
@@ -83,7 +89,7 @@ export class ContractValidator {
 
   private constructor(
     readonly apis: Record<ApiName, OpenApiDoc>,
-    readonly asyncapi: AsyncApiDoc,
+    readonly asyncapis: Record<EventSource, AsyncApiDoc>,
   ) {
     this.ajv = new Ajv2020({ strict: true, allErrors: true, strictTypes: false });
     addFormats(this.ajv);
@@ -91,16 +97,22 @@ export class ContractValidator {
       const { id } = OPENAPI_FILES[name];
       this.ajv.addSchema({ $id: id, $defs: rewriteRefs(apis[name].components.schemas, id) });
     }
-    this.ajv.addSchema({ $id: ASYNCAPI_ID, $defs: rewriteRefs(asyncapi.components.schemas, ASYNCAPI_ID) });
+    for (const name of Object.keys(ASYNCAPI_FILES) as EventSource[]) {
+      const { id } = ASYNCAPI_FILES[name];
+      this.ajv.addSchema({ $id: id, $defs: rewriteRefs(asyncapis[name].components.schemas, id) });
+    }
   }
 
   static load(): ContractValidator {
     const read = <T>(file: string) => parse(readFileSync(specPath(file), 'utf8')) as T;
-    const apis = {
-      loyalty: read<OpenApiDoc>(OPENAPI_FILES.loyalty.file),
-      cdp: read<OpenApiDoc>(OPENAPI_FILES.cdp.file),
-    };
-    return new ContractValidator(apis, read<AsyncApiDoc>('asyncapi.yaml'));
+    const load = <K extends string, T>(files: Record<K, { file: string }>) =>
+      Object.fromEntries(Object.entries<{ file: string }>(files).map(([name, { file }]) => [name, read<T>(file)])) as Record<K, T>;
+    return new ContractValidator(load<ApiName, OpenApiDoc>(OPENAPI_FILES), load<EventSource, AsyncApiDoc>(ASYNCAPI_FILES));
+  }
+
+  /** The loyalty engine's AsyncAPI document. */
+  get asyncapi(): AsyncApiDoc {
+    return this.asyncapis.loyalty;
   }
 
   /** The loyalty engine's OpenAPI document. */
@@ -126,9 +138,9 @@ export class ContractValidator {
     return result;
   }
 
-  /** Event types (AsyncAPI message names) the engine may publish. */
-  eventTypes(): string[] {
-    return Object.values(this.asyncapi.components.messages).map((message) => message.name);
+  /** Event types (AsyncAPI message names) one publisher may send. */
+  eventTypes(source: EventSource = 'loyalty'): string[] {
+    return Object.values(this.asyncapis[source].components.messages).map((message) => message.name);
   }
 
   validateResponse(operationId: string, status: number, body: unknown): ValidationResult {
@@ -175,15 +187,18 @@ export class ContractValidator {
     return this.run(`component:${api}:${name}`, ref, OPENAPI_FILES[api].id, body, name);
   }
 
-  /** Picks the AsyncAPI message from the event's own `type` and validates the whole event. */
+  /**
+   * Picks the AsyncAPI message from the event's own `type` (message names are
+   * unique across documents; a spec test checks it) and validates the event.
+   */
   validateEvent(event: unknown): ValidationResult {
     const type = (event as { type?: unknown } | null)?.type;
-    const message = Object.values(this.asyncapi.components.messages).find((m) => m.name === type);
     const against = `event ${String(type)}`;
-    if (!message) {
-      return { valid: false, against, errors: [`type ${JSON.stringify(type)} is not a message in asyncapi.yaml`] };
+    for (const source of Object.keys(ASYNCAPI_FILES) as EventSource[]) {
+      const message = Object.values(this.asyncapis[source].components.messages).find((m) => m.name === type);
+      if (message) return this.run(`event:${message.name}`, message.payload, ASYNCAPI_FILES[source].id, event, against);
     }
-    return this.run(`event:${message.name}`, message.payload, ASYNCAPI_ID, event, against);
+    return { valid: false, against, errors: [`type ${JSON.stringify(type)} is not a message in any AsyncAPI document`] };
   }
 
   /** operationIds are unique across all OpenAPI documents (a spec test checks it). */

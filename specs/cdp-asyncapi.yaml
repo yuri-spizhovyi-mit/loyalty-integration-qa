@@ -1,0 +1,84 @@
+asyncapi: 3.0.0
+info:
+  title: Customer data platform events
+  version: 1.0.0
+  description: |
+    Events the customer data platform publishes after it updates a profile.
+    The notification service consumes them.
+
+    `profile.tier_changed` is published once for each engine `tier.changed`
+    event that changes the profile's tier. A duplicate tier.changed publishes
+    nothing. So does a stale one that arrives after a newer tier change.
+    Delivery is at least once, so consumers must deduplicate. `sourceEventId`
+    is the eventId of the engine event, and it is the same on every copy.
+
+    Tier names use the profile's lower-case vocabulary. `marketingConsent` is
+    what the profile knows when the tier changes. It is null when the
+    customer.created event has not arrived yet.
+defaultContentType: application/json
+
+channels:
+  profileEvents:
+    address: profile.events
+    messages:
+      ProfileTierChanged: { $ref: '#/components/messages/ProfileTierChanged' }
+
+operations:
+  publishProfileEvents:
+    action: send
+    channel: { $ref: '#/channels/profileEvents' }
+    messages:
+      - { $ref: '#/channels/profileEvents/messages/ProfileTierChanged' }
+
+components:
+  messages:
+    ProfileTierChanged:
+      name: profile.tier_changed
+      summary: The profile's loyalty tier changed.
+      payload: { $ref: '#/components/schemas/ProfileTierChanged' }
+
+  schemas:
+    CustomerId:
+      type: string
+      pattern: '^[A-Za-z0-9_-]{3,64}$'
+    TransactionId:
+      type: string
+      pattern: '^txn_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    Timestamp:
+      type: string
+      format: date-time
+      pattern: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$'
+    ProfileTier:
+      type: string
+      enum: [bronze, silver, gold]
+
+    ProfileTierChanged:
+      type: object
+      required: [eventId, type, customerId, correlationId, occurredAt, sourceEventId, data]
+      additionalProperties: false
+      properties:
+        eventId: { type: string, format: uuid }
+        type: { const: profile.tier_changed }
+        customerId: { $ref: '#/components/schemas/CustomerId' }
+        correlationId: { type: string, minLength: 1, maxLength: 128 }
+        occurredAt: { $ref: '#/components/schemas/Timestamp' }
+        sourceEventId: { type: string, format: uuid }
+        data:
+          type: object
+          required: [previousTier, newTier, direction, marketingConsent, transactionId]
+          additionalProperties: false
+          properties:
+            previousTier: { $ref: '#/components/schemas/ProfileTier' }
+            newTier: { $ref: '#/components/schemas/ProfileTier' }
+            direction: { enum: [upgrade, downgrade] }
+            marketingConsent: { type: [boolean, 'null'] }
+            transactionId: { $ref: '#/components/schemas/TransactionId' }
+          # The six possible moves. This makes the schema reject an unchanged
+          # tier and a direction that contradicts the tiers.
+          oneOf:
+            - { properties: { previousTier: { const: bronze }, newTier: { const: silver }, direction: { const: upgrade } } }
+            - { properties: { previousTier: { const: bronze }, newTier: { const: gold }, direction: { const: upgrade } } }
+            - { properties: { previousTier: { const: silver }, newTier: { const: gold }, direction: { const: upgrade } } }
+            - { properties: { previousTier: { const: silver }, newTier: { const: bronze }, direction: { const: downgrade } } }
+            - { properties: { previousTier: { const: gold }, newTier: { const: silver }, direction: { const: downgrade } } }
+            - { properties: { previousTier: { const: gold }, newTier: { const: bronze }, direction: { const: downgrade } } }

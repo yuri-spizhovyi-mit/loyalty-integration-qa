@@ -57,6 +57,17 @@ interface ProfileState {
 
 export type ApplyResult = 'applied' | 'duplicate';
 
+export interface ApplyOutcome {
+  result: ApplyResult;
+  /**
+   * Set when a tier.changed event wrote the profile's tier. Not set for a
+   * duplicate, or for a stale tier.changed that a newer event already
+   * overrode, so downstream systems only hear about tier changes that the
+   * profile actually shows.
+   */
+  tierChange: { marketingConsent: boolean | null } | null;
+}
+
 const MAX_MISSING_REPORTED = 100;
 
 export class ProfileStore {
@@ -68,7 +79,7 @@ export class ProfileStore {
     return state ? structuredClone(state.profile) : undefined;
   }
 
-  apply(event: LoyaltyEvent): ApplyResult {
+  apply(event: LoyaltyEvent): ApplyOutcome {
     const state = this.stateFor(event.customerId);
     const { profile } = state;
     const now = new Date().toISOString();
@@ -76,7 +87,7 @@ export class ProfileStore {
     if (this.seenEventIds.has(event.eventId)) {
       profile.sync.duplicateEvents += 1;
       profile.sync.updatedAt = now;
-      return 'duplicate';
+      return { result: 'duplicate', tierChange: null };
     }
     this.seenEventIds.add(event.eventId);
 
@@ -87,12 +98,14 @@ export class ProfileStore {
     profile.sync.missingSequences = this.missing(state);
     profile.sync.updatedAt = now;
 
-    const set = (group: FieldGroup, values: Partial<ProfileAttributes>) => {
-      if (event.sequence <= state.versions[group]) return; // an equal or newer event already wrote these
+    const set = (group: FieldGroup, values: Partial<ProfileAttributes>): boolean => {
+      if (event.sequence <= state.versions[group]) return false; // an equal or newer event already wrote these
       state.versions[group] = event.sequence;
       Object.assign(profile.attributes, values);
+      return true;
     };
 
+    let tierChange: ApplyOutcome['tierChange'] = null;
     switch (event.type) {
       case 'customer.created':
         set('membership', { marketing_consent: event.data.marketingConsent, member_since: event.occurredAt });
@@ -100,7 +113,9 @@ export class ProfileStore {
         set('balance', { points_balance: 0 });
         break;
       case 'tier.changed':
-        set('tier', { loyalty_tier: lowerTier(event.data.newTier) });
+        if (set('tier', { loyalty_tier: lowerTier(event.data.newTier) })) {
+          tierChange = { marketingConsent: profile.attributes.marketing_consent };
+        }
         break;
       case 'points.earned':
       case 'points.redeemed':
@@ -113,7 +128,7 @@ export class ProfileStore {
         break;
     }
     set('activity', { last_activity_at: event.occurredAt });
-    return 'applied';
+    return { result: 'applied', tierChange };
   }
 
   private stateFor(profileId: string): ProfileState {

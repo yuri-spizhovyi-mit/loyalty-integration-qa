@@ -1,30 +1,15 @@
 import { aCustomer } from '../../src/builders/customer-builder.js';
 import { anEarn, aRedeem, aRefundOf, uniqueIdempotencyKey } from '../../src/builders/transaction-builder.js';
-import type { CdpClient } from '../../src/clients/cdp-client.js';
-import type { Profile } from '../../src/clients/cdp-types.js';
-import type { LoyaltyClient } from '../../src/clients/loyalty-client.js';
-import type { CustomerResponse, LedgerResponse, OutboxResponse } from '../../src/clients/loyalty-types.js';
+import type { CustomerResponse, LedgerResponse } from '../../src/clients/loyalty-types.js';
 import { expect, test } from '../../src/fixtures.js';
 import { readJson } from '../../src/helpers/json.js';
 import { POLL, SYNC_SLA_MS } from '../../src/helpers/polling.js';
+import { waitUntilInSync } from '../../src/helpers/sync.js';
 
 /**
  * End to end: REST call on the engine -> event -> broker -> customer data
  * platform profile. Every check polls; nothing sleeps for a fixed time.
  */
-
-/** Polls until the profile has applied every event the engine published for this customer. */
-async function waitUntilInSync(loyalty: LoyaltyClient, cdp: CdpClient, customerId: string): Promise<Profile> {
-  const outbox = await readJson<OutboxResponse>(await loyalty.getOutbox(customerId));
-  const published = outbox.events.length;
-  await expect
-    .poll(async () => (await cdp.profileOrNull(customerId))?.sync, {
-      ...POLL,
-      message: `profile ${customerId} should have applied all ${published} published events`,
-    })
-    .toMatchObject({ lastSequence: published, appliedEvents: published, missingSequences: [] });
-  return (await cdp.profileOrNull(customerId)) as Profile;
-}
 
 test.describe('Profile sync: engine -> broker -> customer data platform', () => {
   test(`a new member's profile appears within ${SYNC_SLA_MS} ms as Bronze with a zero balance`, async ({

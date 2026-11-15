@@ -10,11 +10,14 @@
   "scripts": {
     "start:loyalty": "tsx services/loyalty-engine/src/main.ts",
     "start:cdp": "tsx services/customer-data-platform/src/main.ts",
+    "start:notifications": "tsx services/notification-service/src/main.ts",
     "start:broker": "tsx services/broker/src/main.ts",
     "test": "playwright test",
     "test:contract": "playwright test --project=contract",
     "test:api": "playwright test --project=api",
     "test:events": "playwright test --project=events",
+    "test:integrity": "playwright test --project=integrity",
+    "test:notifications": "playwright test --project=notifications",
     "report": "playwright show-report",
     "typecheck": "tsc --noEmit"
   },

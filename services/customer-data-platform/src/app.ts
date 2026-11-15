@@ -2,6 +2,7 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import { InvalidEventError, parseEvent } from './events.js';
 import type { FaultInjector, FaultMode } from './faults.js';
 import type { ProfileStore } from './profiles.js';
+import { type ProfileEventPublisher, profileTierChanged } from './publisher.js';
 
 const PROFILE_ID = /^[A-Za-z0-9_-]{3,64}$/;
 const FAULT_MODES: readonly FaultMode[] = ['fail-before-apply', 'fail-after-apply'];
@@ -17,7 +18,7 @@ function sendError(res: Response, status: number, error: ErrorDetails) {
   res.status(status).json({ error, correlationId: (res.locals.correlationId as string | undefined) ?? null });
 }
 
-export function createApp(profiles: ProfileStore, faults: FaultInjector) {
+export function createApp(profiles: ProfileStore, faults: FaultInjector, publisher: ProfileEventPublisher) {
   const app = express();
   app.disable('x-powered-by');
 
@@ -50,7 +51,12 @@ export function createApp(profiles: ProfileStore, faults: FaultInjector) {
     if (fault === 'fail-before-apply') {
       return sendError(res, 503, { code: 'INJECTED_FAULT', message: 'Simulated failure before apply' });
     }
-    const result = profiles.apply(event);
+    const { result, tierChange } = profiles.apply(event);
+    // Queued together with the profile write, before the response: a lost
+    // ack below cannot lose the downstream event (see BrokerRelay).
+    if (tierChange && event.type === 'tier.changed') {
+      publisher.publish(profileTierChanged(event, tierChange.marketingConsent));
+    }
     if (fault === 'fail-after-apply') {
       return sendError(res, 503, { code: 'INJECTED_FAULT', message: 'Simulated failure after apply (ack lost)' });
     }

@@ -3,10 +3,13 @@ import { Broker, type QueueBinding } from './broker.js';
 
 const port = Number(process.env.PORT ?? 3004);
 const cdpUrl = process.env.CDP_URL ?? 'http://localhost:3002';
+const notificationUrl = process.env.NOTIFICATION_URL ?? 'http://localhost:3003';
 
-// One topic today; the notification service gets its own queue in step 5.
+// Engine -> CDP, then CDP -> notification service. Each queue has its own
+// retries and dead-letter queue.
 const bindings: QueueBinding[] = [
   { queue: 'cdp.loyalty-events', topic: 'loyalty.events', subscriberUrl: `${cdpUrl}/events` },
+  { queue: 'notifications.profile-events', topic: 'profile.events', subscriberUrl: `${notificationUrl}/events` },
 ];
 
 const broker = new Broker(bindings, {

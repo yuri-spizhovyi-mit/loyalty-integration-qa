@@ -24,6 +24,13 @@ export function createApp(broker: Broker) {
     res.status(202).json({ messageId: message.messageId, queues: message.deliveries.map((d) => d.queue) });
   });
 
+  app.get('/topics/:topic/messages', (req, res) => {
+    const topic = req.params.topic as string;
+    if (!broker.hasTopic(topic)) return error(res, 404, 'TOPIC_NOT_FOUND', `No queue is bound to topic ${topic}`);
+    const customerId = typeof req.query.customerId === 'string' ? req.query.customerId : undefined;
+    res.json({ topic, messages: broker.messagesOn(topic, customerId) });
+  });
+
   app.get('/messages/:messageId', (req, res) => {
     const message = broker.getMessage(req.params.messageId as string);
     if (!message) return error(res, 404, 'MESSAGE_NOT_FOUND', `Message ${req.params.messageId} not found`);

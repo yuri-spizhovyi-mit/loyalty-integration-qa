@@ -66,6 +66,13 @@ export class QueueInspector {
     return ids;
   }
 
+  /** Messages published on a topic for one customer, oldest first. */
+  async messagesOn(topic: string, customerId: string): Promise<BrokerMessage[]> {
+    const response = await this.request.get(`/topics/${topic}/messages`, { params: { customerId } });
+    if (response.status() !== 200) throw new Error(`messages on ${topic}: ${response.status()} ${await response.text()}`);
+    return ((await response.json()) as { messages: BrokerMessage[] }).messages;
+  }
+
   async message(messageId: string): Promise<BrokerMessage> {
     const response = await this.request.get(`/messages/${messageId}`);
     if (response.status() !== 200) throw new Error(`message ${messageId}: ${response.status()} ${await response.text()}`);

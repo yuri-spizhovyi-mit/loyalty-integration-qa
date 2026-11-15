@@ -31,13 +31,17 @@ export default defineConfig({
     { name: 'contract', testDir: 'tests/contract' },
     { name: 'api', testDir: 'tests/api', dependencies: ['contract'] },
     { name: 'events', testDir: 'tests/events', dependencies: ['contract'] },
+    { name: 'integrity', testDir: 'tests/integrity', dependencies: ['contract'] },
+    { name: 'notifications', testDir: 'tests/notifications', dependencies: ['contract'] },
   ],
-  // Start order does not matter: the engine's relay retries until the broker
-  // is up, and the broker retries until the customer data platform is up.
+  // Start order does not matter: the relays in the engine and the customer
+  // data platform retry until the broker is up, and the broker retries until
+  // its subscribers are up.
   webServer: startServices
     ? [
-        service('broker', config.brokerUrl, { CDP_URL: config.cdpUrl }),
-        service('cdp', config.cdpUrl),
+        service('broker', config.brokerUrl, { CDP_URL: config.cdpUrl, NOTIFICATION_URL: config.notificationUrl }),
+        service('cdp', config.cdpUrl, { BROKER_URL: config.brokerUrl }),
+        service('notifications', config.notificationUrl),
         service('loyalty', config.loyaltyUrl, { BROKER_URL: config.brokerUrl }),
       ]
     : undefined,

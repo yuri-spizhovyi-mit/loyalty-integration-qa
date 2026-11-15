@@ -5,6 +5,7 @@ import { anEventStream, type EventStream } from './builders/event-builder.js';
 import { anEarn } from './builders/transaction-builder.js';
 import { CdpClient } from './clients/cdp-client.js';
 import { LoyaltyClient } from './clients/loyalty-client.js';
+import { NotificationClient } from './clients/notification-client.js';
 import type { CreateCustomerBody, TransactionResponse } from './clients/loyalty-types.js';
 import { config } from './config.js';
 import { readJson } from './helpers/json.js';
@@ -25,12 +26,15 @@ interface Fixtures {
   earnPoints: (customerId: string, points: number) => Promise<TransactionResponse>;
   /** Customer data platform client; responses checked against cdp-openapi.yaml. */
   cdp: CdpClient;
+  /** Notification service client; responses checked against notification-openapi.yaml. */
+  notifications: NotificationClient;
   /** Publishes straight to the broker and inspects deliveries and dead letters. */
   queues: QueueInspector;
   /**
    * Builds events for a synthetic customer that exists only in the event
    * stream (not in the engine), for consumer tests that publish to the broker
-   * directly. Any fault injected for that customer is cleared afterwards.
+   * directly. Any fault injected for that customer (in the customer data
+   * platform or the notification service) is cleared afterwards.
    */
   eventStream: EventStream;
   /** Prints the correlation and customer IDs when a test fails. */
@@ -74,17 +78,24 @@ export const test = base.extend<Fixtures>({
     await context.dispose();
   },
 
+  notifications: async ({ playwright, correlationId }, use) => {
+    const context = await apiContext(playwright.request, config.notificationUrl, correlationId);
+    await use(new NotificationClient(context, getContract()));
+    await context.dispose();
+  },
+
   queues: async ({ playwright, correlationId }, use) => {
     const context = await apiContext(playwright.request, config.brokerUrl, correlationId);
     await use(new QueueInspector(context));
     await context.dispose();
   },
 
-  eventStream: async ({ cdp, correlationId }, use, testInfo) => {
+  eventStream: async ({ cdp, notifications, correlationId }, use, testInfo) => {
     const customerId = uniqueCustomerId('evt');
     testInfo.annotations.push({ type: 'customerId', description: customerId });
     await use(anEventStream(customerId, correlationId));
     await cdp.clearFault(customerId);
+    await notifications.clearFault(customerId);
   },
 
   earnPoints: async ({ loyalty }, use) => {
