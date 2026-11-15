@@ -73,4 +73,4 @@ npx playwright show-report
 
 ## Status
 
-Work in progress. Planned order: REST suite → schema validation → async event tests → integrity checks → CI.
+Complete: REST suite → schema validation → async event tests → integrity checks and notifications → CI → test strategy. 320 tests run on every push to `main`, on pull requests and nightly in GitHub Actions. Planned next steps are listed in `docs/TEST_STRATEGY.md` (section 9).
