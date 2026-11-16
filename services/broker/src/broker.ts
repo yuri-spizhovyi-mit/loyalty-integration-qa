@@ -232,28 +232,42 @@ export class Broker implements MessageBroker {
     );
   }
 
-  private async attempt(url: string, message: Message, attempt: number): Promise<Attempt> {
-    const at = new Date().toISOString();
-    try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Message-Id': message.messageId,
-          'X-Delivery-Attempt': String(attempt),
-          ...(message.correlationId ? { 'X-Correlation-ID': message.correlationId } : {}),
-        },
-        body: message.payload,
-        signal: AbortSignal.timeout(this.options.deliveryTimeoutMs),
-      });
-      const status = response.status;
-      if (status >= 200 && status < 300) return { attempt, at, status, outcome: 'ack', error: null };
-      const error = `HTTP ${status}: ${(await response.text()).slice(0, ERROR_BODY_CHARS)}`;
-      // 408 and 429 are "try again later", not "this message is bad".
-      const permanent = status >= 400 && status < 500 && status !== 408 && status !== 429;
-      return { attempt, at, status, outcome: permanent ? 'reject' : 'retry', error };
-    } catch (error) {
-      return { attempt, at, status: null, outcome: 'retry', error: String(error) };
-    }
+  private attempt(url: string, message: Message, attempt: number): Promise<Attempt> {
+    return pushToSubscriber(url, message, attempt, this.options.deliveryTimeoutMs);
+  }
+}
+
+/**
+ * One push of a message to a subscriber's HTTP endpoint, and what the answer
+ * means for the broker: 2xx = ack, a permanent 4xx = dead-letter at once,
+ * anything else = retry. Exported for the broker's consumer contract test.
+ */
+export async function pushToSubscriber(
+  url: string,
+  message: Pick<Message, 'messageId' | 'correlationId' | 'payload'>,
+  attempt: number,
+  timeoutMs: number,
+): Promise<Attempt> {
+  const at = new Date().toISOString();
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Message-Id': message.messageId,
+        'X-Delivery-Attempt': String(attempt),
+        ...(message.correlationId ? { 'X-Correlation-ID': message.correlationId } : {}),
+      },
+      body: message.payload,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const status = response.status;
+    if (status >= 200 && status < 300) return { attempt, at, status, outcome: 'ack', error: null };
+    const error = `HTTP ${status}: ${(await response.text()).slice(0, ERROR_BODY_CHARS)}`;
+    // 408 and 429 are "try again later", not "this message is bad".
+    const permanent = status >= 400 && status < 500 && status !== 408 && status !== 429;
+    return { attempt, at, status, outcome: permanent ? 'reject' : 'retry', error };
+  } catch (error) {
+    return { attempt, at, status: null, outcome: 'retry', error: String(error) };
   }
 }

@@ -34,6 +34,29 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
 
+  pact:
+    name: Consumer-driven contracts (Pact)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      # In-process: consumer tests write the pacts, then each provider is
+      # verified against them. No stack needed (LOYALTY_URL only stops
+      # Playwright from starting the services).
+      - name: Consumer tests and provider verification
+        run: npx playwright test --project=pact-provider
+        env:
+          LOYALTY_URL: http://localhost:3001
+      # A contract change must be reviewed: the regenerated pacts must equal
+      # the committed ones.
+      - name: Pact files are committed
+        run: git diff --exit-code -- pacts/
+
   test:
     name: Tests on ${{ matrix.name }} (Docker Compose stack)
     runs-on: ubuntu-latest

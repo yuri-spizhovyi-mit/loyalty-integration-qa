@@ -57,15 +57,18 @@ The tests are prioritised by risk: what goes wrong in loyalty integrations, and 
 | R13 | A failed transaction still triggers downstream effects | Profile and messages disagree with the ledger | "failed transactions publish nothing" and "failed transactions send nothing" |
 | R14 | Kafka specifics break an assumption: a customer's events land on different partitions and lose their order, an offset is committed before the record is handled (lost on a crash), or a dead-letter record cannot be traced back | Out-of-order profiles, silently lost events, dead letters nobody can redrive | `tests/kafka/kafka-semantics.spec.ts` |
 | R15 | Recovery goes wrong: a consumer crashes after writing but before committing and applies the event twice, an outgoing event is lost in the crash, a Kafka outage loses events, a consumer silently stops reading after an outage, or a rebalance loses or repeats records | Lost or doubled points and messages, a profile that stops updating while everything reports healthy | `tests/chaos/kafka-failures.spec.ts` |
+| R16 | A provider changes something a consumer relies on (renames a field, changes a value's case, turns "unknown" into "false", answers 500 where 400 was expected), and each side's own tests still pass | The integration breaks at release, or a poison message is retried forever | `tests/pact/*` |
 
 ## 3. Test approach
 
 ### Layers
 
-The suite has seven Playwright projects. `contract` runs first, and the others depend on it (§7.2). The `kafka` project exists only when the stack runs on Kafka, and `chaos` only with `CHAOS=true` on Kafka (as in CI). Both run last, one test at a time (§7.11).
+The suite has nine Playwright projects. `pact-consumer` and `pact-provider` run in-process and need no running stack (§7.13). `contract` runs first of the end-to-end projects, and the others depend on it (§7.2). The `kafka` project exists only when the stack runs on Kafka, and `chaos` only with `CHAOS=true` on Kafka (as in CI). Both run last, one test at a time (§7.11).
 
 | Project | Folder | Tests | Purpose |
 |---|---:|---:|---|
+| pact-consumer | `tests/pact/consumer` | 14 | Consumer-driven contracts: each consumer runs its own handler against the messages or answers it relies on, and writes a pact file |
+| pact-provider | `tests/pact/provider` | 4 + 5 | Each provider's real code verified against those pacts; coverage guards tie the pacts to the AsyncAPI event types and the broker's three outcomes |
 | contract | `tests/contract` | 161 | Specs are valid and consistent; every documented response and event is produced and matches its schema; services accept exactly what the specs allow |
 | api | `tests/api` | 76 | Loyalty engine REST behaviour: functional, negative, boundary, idempotency, concurrency |
 | events | `tests/events` | 29 | Profile sync end to end; duplicates; ordering; retries and dead-letter queue |
@@ -73,7 +76,7 @@ The suite has seven Playwright projects. `contract` runs first, and the others d
 | notifications | `tests/notifications` | 20 | Notification triggers end to end, and exactly-once behaviour under faults |
 | kafka | `tests/kafka` | 5 + 3 | Kafka only. 5 in both retry modes: the running mode, keys and partitions, dead-letter records. 3 for the running mode: head-of-line blocking, commit timing and lag (blocking), or no blocking, parking and reordering (retry topics) |
 | chaos | `tests/chaos` | 4 | Kafka with `CHAOS=true` only: the CDP crashing after applying but before committing, Kafka stopped for 15 s and restarted, a broken consumer stream, a second CDP instance joining and leaving the group |
-| **Total** | | **321 + 8 + 4** | 321 on the in-memory broker; 329 on Kafka in either retry mode; 333 with the chaos tests. The first 321 run unchanged everywhere |
+| **Total** | | **344 + 8 + 4** | 344 on the in-memory broker; 352 on Kafka in either retry mode; 356 with the chaos tests. The first 344 run unchanged everywhere |
 
 ### Test design techniques
 
@@ -84,7 +87,7 @@ The suite has seven Playwright projects. `contract` runs first, and the others d
 - **Fault injection.** Test-only endpoints make the CDP or the notification service fail for one customer, either before processing (an outage) or after it (a lost acknowledgement). This drives the retry, duplicate and DLQ paths on purpose instead of waiting for them to happen.
 - **Seeded random runs.** Ledger reconciliation runs random mixes of earns, redeems, refunds and retries with fixed seeds, so a failure can be replayed exactly. The seed is in the test title, and the operation log is attached to the report.
 - **Independent oracles.** Expected tiers and ledger rules are written in the test code from the business rules (`src/helpers/reconciliation.ts`), never imported from the services.
-- **Mutation testing (manual).** Bugs were injected into the services one at a time to show the tests catch them. Examples: no deduplication, last-arrival-wins, consent ignored, unknown consent treated as consent, publishing after the acknowledgement, a wrong `balanceAfter`, tier not lower-cased. Four more were Kafka-specific: committing before handling, losing per-partition order, a random key instead of the customer ID, and a dead-letter record without its source placement. Three more were for retry topics: retrying in place anyway, no delay on the retry topics, and a dead-letter record that points at the retry topic instead of the original. Three more were for recovery: deduplication not persisted, the outbox kept in memory, and no restart of a failed consumer stream. All 24 were caught. One planned recovery mutant, "the engine's relay drops events while Kafka is down", could not be reached: the Kafka client waits through an outage instead of failing the send, so the relay's error path never runs (§7.12). This is not automated yet (§9).
+- **Mutation testing (manual).** Bugs were injected into the services one at a time to show the tests catch them. Examples: no deduplication, last-arrival-wins, consent ignored, unknown consent treated as consent, publishing after the acknowledgement, a wrong `balanceAfter`, tier not lower-cased. Four more were Kafka-specific: committing before handling, losing per-partition order, a random key instead of the customer ID, and a dead-letter record without its source placement. Three more were for retry topics: retrying in place anyway, no delay on the retry topics, and a dead-letter record that points at the retry topic instead of the original. Three more were for recovery: deduplication not persisted, the outbox kept in memory, and no restart of a failed consumer stream. Five more were for the consumer-driven contracts: the engine renaming `balanceAfter`, the engine sending lower-case tier names, the CDP turning unknown consent into `false`, the CDP answering 500 to an unreadable event, and the broker retrying a 400. All 29 were caught. One planned recovery mutant, "the engine's relay drops events while Kafka is down", could not be reached: the Kafka client waits through an outage instead of failing the send, so the relay's error path never runs (§7.12). This is not automated yet (§9).
 
 ### Framework structure
 
@@ -118,7 +121,8 @@ The suite has seven Playwright projects. `contract` runs first, and the others d
 2. No test is skipped, except by the coverage guards on purpose. CI uses `forbidOnly`, so a stray `test.only` fails the run.
 3. The nightly run, which repeats every test 3 times, has been green since the change was merged. A failure there is treated as a defect (a flaky test or a race in the system), not ignored.
 4. Every new endpoint, response status, event type or field mapping has its row in a spec, and the coverage tests prove it is exercised. They fail when a documented response or a mapping row has no test.
-5. Any defect found is either fixed with a regression test, or recorded with an accepted risk.
+5. Every pact is verified against its provider, and the pact files in `pacts/` equal the ones the consumer tests write. A contract change is therefore part of the pull request, where the provider's team sees it.
+6. Any defect found is either fixed with a regression test, or recorded with an accepted risk.
 
 ## 6. Acceptance criteria
 
@@ -267,6 +271,23 @@ A third finding was in the tests themselves. The broker's `/queues` counted dead
 
 **A limit worth knowing.** The Kafka client's `send` does not fail while Kafka is unreachable; it waits. So the relay never sees an error during an outage, and a "drop on error" bug in it would go unnoticed by any test. That is why the outage test checks the outcome (events held, then delivered) rather than the error path.
 
+### 7.13 Consumer-driven contracts next to the schema tests
+
+The AsyncAPI and OpenAPI schemas say what a provider *may* send. A pact says what each consumer *needs*, written by that consumer, and the provider is verified against it. The two catch different bugs, so the suite has both.
+
+**Three contracts** (Pact JS, specification v4):
+- **CDP ← loyalty engine**, five asynchronous messages, one per event type. The consumer test runs the CDP's real handler on each example and checks the mapped profile. The engine is verified by running its real service (ledger, tiers, event building), not a copy of it.
+- **Notification service ← CDP**, `profile.tier_changed` with consent `true`, `false` and `null`. The three lead to three different decisions, so the values are exact, not "any boolean". The CDP is verified by feeding it real engine events, including the case where `customer.created` has not arrived yet.
+- **Broker → CDP and notification service**, HTTP. The in-memory broker decides from the status alone: 2xx is delivered, 400 is dead-lettered at once, 503 is retried. The pacts pin those three answers. The provider state "cannot process events right now" uses the services' own fault injection.
+
+**Choices.**
+- **In-process, no stack.** Both sides run in the test process, so the pacts run in seconds and in a CI job of their own, before anything is deployed. That is what makes them useful as a gate: they say whether two versions *can* work together without starting them together.
+- **White-box, on purpose.** These are the only tests that import service code. A consumer test has to run the consumer's handler, and a verification has to run the producer. The rest of the suite stays black-box over HTTP.
+- **Pact files in the repository, not a Pact Broker.** With one repository, the committed files do the broker's job: CI regenerates them and fails if they differ from the committed ones, so a contract change shows up in review. With separate teams, a Pact Broker and `can-i-deploy` would replace this.
+- **Matchers mirror the consumer's own checks.** Each matcher is the rule the consumer really applies: a UUID, the transaction ID pattern, a UTC timestamp, an exact `sequence: 1` on `customer.created`. Pact matches types and formats, not ranges, so rules such as "points ≥ 1" stay with the schema tests.
+
+**What the contracts do not catch, found by trying it.** Pact lets a provider send fields the consumer did not ask for, which is the "tolerant reader" rule. The CDP is not a tolerant reader: it rejects unknown fields. A bug that added `data.channel` to the engine's events passed the engine's own verification, yet the CDP rejected every such event. It was caught twice anyway: by the AsyncAPI schema tests (`additionalProperties: false`), and by the CDP's verification, because that one runs real engine events through the CDP. The lesson: a strict consumer needs schema tests as well as pacts, or it needs to become tolerant. Changing the consumer is the better long-term fix, but it would change the event contract itself, so it is left as a decision for the teams (§9).
+
 ## 8. Reporting and defect handling
 
 - **Reports.** Every CI run uploads the Playwright HTML report as an artifact, one per bus. A failed run also uploads the raw test results and the logs of all four containers. In CI, failures are also annotated on the commit, and a JUnit file is written for tools that read one.
@@ -277,7 +298,8 @@ A third finding was in the tests themselves. The broker's `/queues` counted dead
 
 - **A Kafka cluster**: three brokers with replication, to test broker failover and `min.insync.replicas`. Plus a schema registry for message contracts.
 - **Automated mutation testing** (for example Stryker) on the services, in place of the manual runs described in §3.
-- **Consumer-driven contracts** between the real teams, so a provider change is checked against what each consumer actually uses.
+- **A Pact Broker** with `can-i-deploy`, once the services live in separate repositories. Today the pacts are committed files (§7.13).
+- **Tolerant readers**: let the CDP and the notification service ignore unknown fields, so a provider can add a field without breaking them (§7.13). This changes the event contract, so it needs the teams' agreement first.
 - **A consent-change event**, and tests for consent withdrawn between a tier change and its notification.
 - **Persist the engine's outbox** (and the notification service's state), then test an engine crash during a Kafka outage.
 - **Load tests** with latency targets, kept separate from the functional suite.

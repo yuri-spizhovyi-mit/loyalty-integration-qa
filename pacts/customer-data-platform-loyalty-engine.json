@@ -1,0 +1,513 @@
+{
+  "consumer": {
+    "name": "customer-data-platform"
+  },
+  "interactions": [
+    {
+      "contents": {
+        "content": {
+          "correlationId": "pact-correlation-1",
+          "customerId": "pact-customer-1",
+          "data": {
+            "marketingConsent": true,
+            "tier": "Bronze"
+          },
+          "eventId": "6f1c2a8e-3b4d-4e5f-8a9b-0c1d2e3f4a5b",
+          "occurredAt": "2026-11-15T10:00:00.000Z",
+          "sequence": 1,
+          "type": "customer.created"
+        },
+        "contentType": "application/json",
+        "encoded": false
+      },
+      "description": "a customer.created event",
+      "matchingRules": {
+        "body": {
+          "$.correlationId": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "type"
+              }
+            ]
+          },
+          "$.customerId": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "regex",
+                "regex": "^[A-Za-z0-9_-]{3,64}$"
+              }
+            ]
+          },
+          "$.data.marketingConsent": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "type"
+              }
+            ]
+          },
+          "$.eventId": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "regex",
+                "regex": "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+              }
+            ]
+          },
+          "$.occurredAt": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "regex",
+                "regex": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+              }
+            ]
+          }
+        }
+      },
+      "pending": false,
+      "type": "Asynchronous/Messages"
+    },
+    {
+      "contents": {
+        "content": {
+          "correlationId": "pact-correlation-1",
+          "customerId": "pact-customer-1",
+          "data": {
+            "balanceAfter": 250,
+            "entryType": "EARN",
+            "points": 250,
+            "reference": "order-1001",
+            "refundOf": null,
+            "transactionId": "txn_1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
+          },
+          "eventId": "6f1c2a8e-3b4d-4e5f-8a9b-0c1d2e3f4a5b",
+          "occurredAt": "2026-11-15T10:00:00.000Z",
+          "sequence": 2,
+          "type": "points.earned"
+        },
+        "contentType": "application/json",
+        "encoded": false
+      },
+      "description": "a points.earned event",
+      "matchingRules": {
+        "body": {
+          "$.correlationId": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "type"
+              }
+            ]
+          },
+          "$.customerId": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "regex",
+                "regex": "^[A-Za-z0-9_-]{3,64}$"
+              }
+            ]
+          },
+          "$.data.balanceAfter": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "integer"
+              }
+            ]
+          },
+          "$.data.points": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "integer"
+              }
+            ]
+          },
+          "$.data.reference": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "type"
+              }
+            ]
+          },
+          "$.data.transactionId": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "regex",
+                "regex": "^txn_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              }
+            ]
+          },
+          "$.eventId": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "regex",
+                "regex": "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+              }
+            ]
+          },
+          "$.occurredAt": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "regex",
+                "regex": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+              }
+            ]
+          },
+          "$.sequence": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "integer"
+              }
+            ]
+          }
+        }
+      },
+      "pending": false,
+      "type": "Asynchronous/Messages"
+    },
+    {
+      "contents": {
+        "content": {
+          "correlationId": "pact-correlation-1",
+          "customerId": "pact-customer-1",
+          "data": {
+            "balanceAfter": 150,
+            "entryType": "REDEEM",
+            "points": -100,
+            "reference": null,
+            "refundOf": null,
+            "transactionId": "txn_1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
+          },
+          "eventId": "6f1c2a8e-3b4d-4e5f-8a9b-0c1d2e3f4a5b",
+          "occurredAt": "2026-11-15T10:00:00.000Z",
+          "sequence": 3,
+          "type": "points.redeemed"
+        },
+        "contentType": "application/json",
+        "encoded": false
+      },
+      "description": "a points.redeemed event",
+      "matchingRules": {
+        "body": {
+          "$.correlationId": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "type"
+              }
+            ]
+          },
+          "$.customerId": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "regex",
+                "regex": "^[A-Za-z0-9_-]{3,64}$"
+              }
+            ]
+          },
+          "$.data.balanceAfter": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "integer"
+              }
+            ]
+          },
+          "$.data.points": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "integer"
+              }
+            ]
+          },
+          "$.data.transactionId": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "regex",
+                "regex": "^txn_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              }
+            ]
+          },
+          "$.eventId": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "regex",
+                "regex": "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+              }
+            ]
+          },
+          "$.occurredAt": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "regex",
+                "regex": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+              }
+            ]
+          },
+          "$.sequence": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "integer"
+              }
+            ]
+          }
+        }
+      },
+      "pending": false,
+      "type": "Asynchronous/Messages"
+    },
+    {
+      "contents": {
+        "content": {
+          "correlationId": "pact-correlation-1",
+          "customerId": "pact-customer-1",
+          "data": {
+            "balanceAfter": 0,
+            "entryType": "REFUND",
+            "points": -250,
+            "reference": null,
+            "refundOf": "txn_0f1e2d3c-4b5a-4968-8776-655443322110",
+            "transactionId": "txn_1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
+          },
+          "eventId": "6f1c2a8e-3b4d-4e5f-8a9b-0c1d2e3f4a5b",
+          "occurredAt": "2026-11-15T10:00:00.000Z",
+          "sequence": 3,
+          "type": "points.refunded"
+        },
+        "contentType": "application/json",
+        "encoded": false
+      },
+      "description": "a points.refunded event",
+      "matchingRules": {
+        "body": {
+          "$.correlationId": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "type"
+              }
+            ]
+          },
+          "$.customerId": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "regex",
+                "regex": "^[A-Za-z0-9_-]{3,64}$"
+              }
+            ]
+          },
+          "$.data.balanceAfter": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "integer"
+              }
+            ]
+          },
+          "$.data.points": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "integer"
+              }
+            ]
+          },
+          "$.data.refundOf": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "regex",
+                "regex": "^txn_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              }
+            ]
+          },
+          "$.data.transactionId": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "regex",
+                "regex": "^txn_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              }
+            ]
+          },
+          "$.eventId": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "regex",
+                "regex": "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+              }
+            ]
+          },
+          "$.occurredAt": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "regex",
+                "regex": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+              }
+            ]
+          },
+          "$.sequence": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "integer"
+              }
+            ]
+          }
+        }
+      },
+      "pending": false,
+      "type": "Asynchronous/Messages"
+    },
+    {
+      "contents": {
+        "content": {
+          "correlationId": "pact-correlation-1",
+          "customerId": "pact-customer-1",
+          "data": {
+            "direction": "upgrade",
+            "newTier": "Silver",
+            "previousTier": "Bronze",
+            "qualifyingPoints": 1000,
+            "transactionId": "txn_1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
+          },
+          "eventId": "6f1c2a8e-3b4d-4e5f-8a9b-0c1d2e3f4a5b",
+          "occurredAt": "2026-11-15T10:00:00.000Z",
+          "sequence": 3,
+          "type": "tier.changed"
+        },
+        "contentType": "application/json",
+        "encoded": false
+      },
+      "description": "a tier.changed event",
+      "matchingRules": {
+        "body": {
+          "$.correlationId": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "type"
+              }
+            ]
+          },
+          "$.customerId": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "regex",
+                "regex": "^[A-Za-z0-9_-]{3,64}$"
+              }
+            ]
+          },
+          "$.data.direction": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "regex",
+                "regex": "^(upgrade|downgrade)$"
+              }
+            ]
+          },
+          "$.data.newTier": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "regex",
+                "regex": "^(Bronze|Silver|Gold)$"
+              }
+            ]
+          },
+          "$.data.previousTier": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "regex",
+                "regex": "^(Bronze|Silver|Gold)$"
+              }
+            ]
+          },
+          "$.data.qualifyingPoints": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "integer"
+              }
+            ]
+          },
+          "$.data.transactionId": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "regex",
+                "regex": "^txn_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              }
+            ]
+          },
+          "$.eventId": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "regex",
+                "regex": "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+              }
+            ]
+          },
+          "$.occurredAt": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "regex",
+                "regex": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+              }
+            ]
+          },
+          "$.sequence": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "integer"
+              }
+            ]
+          }
+        }
+      },
+      "pending": false,
+      "type": "Asynchronous/Messages"
+    }
+  ],
+  "metadata": {
+    "pact-js": {
+      "version": "17.1.4"
+    },
+    "pactRust": {
+      "ffi": "0.5.8",
+      "models": "1.3.16"
+    },
+    "pactSpecification": {
+      "version": "4.0"
+    }
+  },
+  "provider": {
+    "name": "loyalty-engine"
+  }
+}

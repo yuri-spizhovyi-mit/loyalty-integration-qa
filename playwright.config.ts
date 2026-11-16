@@ -2,6 +2,8 @@ import { defineConfig } from '@playwright/test';
 import { config } from './src/config.js';
 
 const isCI = Boolean(process.env.CI);
+// Pact JS sends anonymous usage statistics unless told not to.
+process.env.PACT_DO_NOT_TRACK ??= 'true';
 // When LOYALTY_URL is set the stack is already running (Docker Compose, a
 // shared environment); otherwise Playwright starts the mock services itself.
 const startServices = !process.env.LOYALTY_URL;
@@ -37,6 +39,10 @@ export default defineConfig({
   // shape is broken, the behaviour tests would fail for the wrong reason, so
   // they are skipped and the contract failure is reported on its own.
   projects: [
+    // Consumer-driven contracts (Pact): in-process, no running stack needed.
+    // Consumer tests write the pact files; provider verification reads them.
+    { name: 'pact-consumer', testDir: 'tests/pact/consumer', fullyParallel: false },
+    { name: 'pact-provider', testDir: 'tests/pact/provider', fullyParallel: false, dependencies: ['pact-consumer'] },
     { name: 'contract', testDir: 'tests/contract' },
     { name: 'api', testDir: 'tests/api', dependencies: ['contract'] },
     { name: 'events', testDir: 'tests/events', dependencies: ['contract'] },

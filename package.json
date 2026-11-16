@@ -18,6 +18,7 @@
     "test:events": "playwright test --project=events",
     "test:integrity": "playwright test --project=integrity",
     "test:notifications": "playwright test --project=notifications",
+    "test:pact": "playwright test --project=pact-provider",
     "report": "playwright show-report",
     "typecheck": "tsc --noEmit"
   },
@@ -26,6 +27,7 @@
     "express": "^5.1.0"
   },
   "devDependencies": {
+    "@pact-foundation/pact": "17.1.4",
     "@playwright/test": "^1.65.1",
     "@types/express": "^5.0.6",
     "@types/node": "^24.19.2",

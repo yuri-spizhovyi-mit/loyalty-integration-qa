@@ -1,0 +1,353 @@
+{
+  "consumer": {
+    "name": "broker"
+  },
+  "interactions": [
+    {
+      "description": "a pushed event during a temporary failure",
+      "pending": false,
+      "providerStates": [
+        {
+          "name": "the subscriber cannot process events for the customer right now",
+          "params": {
+            "customerId": "pact-customer-1"
+          }
+        }
+      ],
+      "request": {
+        "body": {
+          "content": {
+            "correlationId": "pact-correlation-1",
+            "customerId": "pact-customer-1",
+            "data": {
+              "marketingConsent": true,
+              "tier": "Bronze"
+            },
+            "eventId": "6f1c2a8e-3b4d-4e5f-8a9b-0c1d2e3f4a5b",
+            "occurredAt": "2026-11-15T10:00:00.000Z",
+            "sequence": 1,
+            "type": "customer.created"
+          },
+          "contentType": "application/json",
+          "encoded": false
+        },
+        "headers": {
+          "Content-Type": [
+            "application/json"
+          ],
+          "X-Correlation-ID": [
+            "pact-correlation-1"
+          ],
+          "X-Delivery-Attempt": [
+            "1"
+          ],
+          "X-Message-Id": [
+            "msg-1"
+          ]
+        },
+        "matchingRules": {
+          "body": {
+            "$.correlationId": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.customerId": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^[A-Za-z0-9_-]{3,64}$"
+                }
+              ]
+            },
+            "$.data.marketingConsent": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.eventId": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+                }
+              ]
+            },
+            "$.occurredAt": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                }
+              ]
+            }
+          },
+          "header": {
+            "X-Correlation-ID": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "X-Delivery-Attempt": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^[1-9][0-9]*$"
+                }
+              ]
+            },
+            "X-Message-Id": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        },
+        "method": "POST",
+        "path": "/events"
+      },
+      "response": {
+        "status": 503
+      },
+      "type": "Synchronous/HTTP"
+    },
+    {
+      "description": "a pushed event it can process",
+      "pending": false,
+      "request": {
+        "body": {
+          "content": {
+            "correlationId": "pact-correlation-1",
+            "customerId": "pact-customer-1",
+            "data": {
+              "marketingConsent": true,
+              "tier": "Bronze"
+            },
+            "eventId": "6f1c2a8e-3b4d-4e5f-8a9b-0c1d2e3f4a5b",
+            "occurredAt": "2026-11-15T10:00:00.000Z",
+            "sequence": 1,
+            "type": "customer.created"
+          },
+          "contentType": "application/json",
+          "encoded": false
+        },
+        "headers": {
+          "Content-Type": [
+            "application/json"
+          ],
+          "X-Correlation-ID": [
+            "pact-correlation-1"
+          ],
+          "X-Delivery-Attempt": [
+            "1"
+          ],
+          "X-Message-Id": [
+            "msg-1"
+          ]
+        },
+        "matchingRules": {
+          "body": {
+            "$.correlationId": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.customerId": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^[A-Za-z0-9_-]{3,64}$"
+                }
+              ]
+            },
+            "$.data.marketingConsent": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.eventId": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+                }
+              ]
+            },
+            "$.occurredAt": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+                }
+              ]
+            }
+          },
+          "header": {
+            "X-Correlation-ID": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "X-Delivery-Attempt": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^[1-9][0-9]*$"
+                }
+              ]
+            },
+            "X-Message-Id": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        },
+        "method": "POST",
+        "path": "/events"
+      },
+      "response": {
+        "status": 200
+      },
+      "type": "Synchronous/HTTP"
+    },
+    {
+      "description": "a pushed event it cannot read",
+      "pending": false,
+      "request": {
+        "body": {
+          "content": {
+            "customerId": "pact-customer-1",
+            "eventId": "not-a-uuid",
+            "type": "points.earned"
+          },
+          "contentType": "application/json",
+          "encoded": false
+        },
+        "headers": {
+          "Content-Type": [
+            "application/json"
+          ],
+          "X-Correlation-ID": [
+            "pact-correlation-1"
+          ],
+          "X-Delivery-Attempt": [
+            "1"
+          ],
+          "X-Message-Id": [
+            "msg-1"
+          ]
+        },
+        "matchingRules": {
+          "header": {
+            "X-Correlation-ID": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "X-Delivery-Attempt": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^[1-9][0-9]*$"
+                }
+              ]
+            },
+            "X-Message-Id": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        },
+        "method": "POST",
+        "path": "/events"
+      },
+      "response": {
+        "body": {
+          "content": {
+            "error": {
+              "code": "INVALID_EVENT"
+            }
+          },
+          "contentType": "application/json",
+          "encoded": false
+        },
+        "headers": {
+          "Content-Type": [
+            "application/json"
+          ]
+        },
+        "matchingRules": {
+          "body": {
+            "$.error.code": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^(INVALID_EVENT|UNKNOWN_EVENT_TYPE|MALFORMED_JSON)$"
+                }
+              ]
+            }
+          }
+        },
+        "status": 400
+      },
+      "type": "Synchronous/HTTP"
+    }
+  ],
+  "metadata": {
+    "pact-js": {
+      "version": "17.1.4"
+    },
+    "pactRust": {
+      "ffi": "0.5.8",
+      "models": "1.3.16"
+    },
+    "pactSpecification": {
+      "version": "4.0"
+    }
+  },
+  "provider": {
+    "name": "customer-data-platform"
+  }
+}
