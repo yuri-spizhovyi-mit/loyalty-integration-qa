@@ -36,7 +36,7 @@ The system under test is a small set of mock services that copy the shape of a r
 
 - **Playwright + TypeScript** with `APIRequestContext` (API testing only, no browser)
 - **Ajv** for JSON Schema validation, with schemas taken from the OpenAPI spec
-- **Node.js mock services** with an in-memory queue (RabbitMQ through Docker as an option)
+- **Node.js mock services** on two message buses: an in-memory queue, and Kafka through Docker Compose
 - **Docker Compose** to run the whole stack locally and in CI
 - **GitHub Actions** for runs on every push plus a nightly run, with an HTML report published as an artifact
 
