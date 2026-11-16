@@ -73,4 +73,4 @@ npx playwright show-report
 
 ## Status
 
-Complete: REST suite → schema validation → async event tests → integrity checks and notifications → CI → test strategy. 320 tests run on every push to `main`, on pull requests and nightly in GitHub Actions. Planned next steps are listed in `docs/TEST_STRATEGY.md` (section 9).
+Complete: REST suite → schema validation → async event tests → integrity checks and notifications → CI → test strategy. 344 tests run on every push to `main`, on pull requests and nightly in GitHub Actions (356 on Kafka, with the chaos tests). Planned next steps are listed in `docs/TEST_STRATEGY.md` (section 9).
